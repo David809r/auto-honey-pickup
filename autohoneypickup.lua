@@ -323,14 +323,15 @@ end
 
 local function getArrivalDistance(jar)
 	local prompt = getClaimPrompt(jar)
+	local configuredDistance = math.clamp(tonumber(config.ArrivalDistance) or 4.5, 1, 6)
 
 	if prompt then
-		-- The real Bee event uses a 12-stud prompt. Stay comfortably inside its
-		-- range so PromptShown fires and the game's own client requests the claim.
-		return math.max(config.ArrivalDistance, prompt.MaxActivationDistance - 2)
+		-- The real Bee event uses a 12-stud prompt. Stop no farther than half of
+		-- that range (and never beyond 6 studs), rather than riding its edge.
+		return math.min(configuredDistance, prompt.MaxActivationDistance * 0.5, 6)
 	end
 
-	return config.ArrivalDistance
+	return configuredDistance
 end
 
 local function trackJar(instance)
@@ -509,6 +510,7 @@ local function queueScriptForTeleport()
 	local queuedSource = string.format([[
 _G.AutoHoneyPickupConfig = {
 	Enabled = %s,
+	ArrivalDistance = %.2f,
 	CarpetSpeed = %d,
 	UseGrapple = %s,
 	ServerHopEnabled = %s,
@@ -520,6 +522,7 @@ _G.AutoHoneyPickupConfig = {
 loadstring(game:HttpGet(%q))()
 ]],
 		tostring(config.Enabled == true),
+		math.clamp(tonumber(config.ArrivalDistance) or 4.5, 1, 6),
 		math.floor(tonumber(config.CarpetSpeed) or 150),
 		tostring(config.UseGrapple == true),
 		tostring(config.ServerHopEnabled == true),

@@ -35,6 +35,7 @@ Set options before loading the script:
 ```lua
 _G.AutoHoneyPickupConfig = {
     Enabled = true,
+    ArrivalDistance = 4.5,
     CarpetSpeed = 150,
     UseGrapple = true,
     ServerHopEnabled = true,
@@ -46,5 +47,7 @@ _G.AutoHoneyPickupConfig = {
 
 loadstring(game:HttpGet("https://raw.githubusercontent.com/David809r/auto-honey-pickup/main/autohoneypickup.lua"))()
 ```
+
+Honey movement stops at the configured arrival distance, capped at 6 studs and at half of the pickup prompt's range. With the default settings, the character stops about 4.5 studs from the Honey instead of near the 12-stud claim boundary.
 
 The fast hopper waits 5 seconds on a fresh loaded server so the Bee controller can restore its state. After Honey is detected, it waits for 2 seconds with no available pickup before choosing another server. Failed hops retry after 3 seconds. If Roblox blocks the public server-list response, the script falls back to normal public matchmaking instead of getting stuck. Teleports must be tested in the Roblox application; Roblox Studio playtesting does not support `TeleportService`.
