@@ -37,12 +37,12 @@ _G.AutoHoneyPickupConfig = {
     CarpetSpeed = 150,
     UseGrapple = true,
     ServerHopEnabled = true,
-    ServerHopStartDelay = 20,
-    ServerHopIdleSeconds = 8,
+    ServerHopStartDelay = 3,
+    ServerHopIdleSeconds = 2,
     Debug = false,
 }
 
 loadstring(game:HttpGet("https://raw.githubusercontent.com/David809r/auto-honey-pickup/main/autohoneypickup.lua"))()
 ```
 
-The hopper waits 20 seconds on a fresh server when no Honey has appeared. After Honey is detected, it waits for 8 seconds with no available pickup before choosing another server. Teleports must be tested in the Roblox application; Roblox Studio playtesting does not support `TeleportService`.
+The fast hopper waits 3 seconds on a fresh loaded server when no Honey appears. After Honey is detected, it waits for 2 seconds with no available pickup before choosing another server. Failed hops retry after 3 seconds. Teleports must be tested in the Roblox application; Roblox Studio playtesting does not support `TeleportService`.

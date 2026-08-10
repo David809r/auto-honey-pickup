@@ -56,6 +56,7 @@ end
 
 -- These can be changed before executing the script, for example:
 -- _G.AutoHoneyPickupConfig = { Enabled = true, Debug = true }
+local previousInternalVersion = tonumber(config.InternalVersion) or 0
 if config.Enabled == nil then config.Enabled = true end
 if config.Debug == nil then config.Debug = false end
 if config.ArrivalDistance == nil then config.ArrivalDistance = 4.5 end
@@ -63,15 +64,24 @@ if config.ScanInterval == nil then config.ScanInterval = 0.25 end
 if config.TargetTimeout == nil then config.TargetTimeout = 30 end
 if config.FlightTimeout == nil then config.FlightTimeout = 10 end
 if config.CarpetSpeed == nil then config.CarpetSpeed = 150 end
-config.InternalVersion = 2
 if config.PreferredCarpet == nil then config.PreferredCarpet = "Flying Carpet" end
 if config.UseGrapple == nil then config.UseGrapple = true end
 if config.ServerHopEnabled == nil then config.ServerHopEnabled = true end
-if config.ServerHopStartDelay == nil then config.ServerHopStartDelay = 20 end
-if config.ServerHopIdleSeconds == nil then config.ServerHopIdleSeconds = 8 end
-if config.ServerHopRetrySeconds == nil then config.ServerHopRetrySeconds = 10 end
-if config.ServerHopMaxPages == nil then config.ServerHopMaxPages = 3 end
+if config.ServerHopStartDelay == nil then config.ServerHopStartDelay = 3 end
+if config.ServerHopIdleSeconds == nil then config.ServerHopIdleSeconds = 2 end
+if config.ServerHopRetrySeconds == nil then config.ServerHopRetrySeconds = 3 end
+if config.ServerHopMaxPages == nil then config.ServerHopMaxPages = 1 end
 if config.RequeueOnTeleport == nil then config.RequeueOnTeleport = true end
+
+-- Version 3 switches existing sessions from the original conservative hopper
+-- timings to the fast Bee-event cadence requested for the 10-minute window.
+if previousInternalVersion < 3 then
+	config.ServerHopStartDelay = 3
+	config.ServerHopIdleSeconds = 2
+	config.ServerHopRetrySeconds = 3
+	config.ServerHopMaxPages = 1
+end
+config.InternalVersion = 3
 
 local trackedJars = {}
 local warnedMissingCarpet = false
@@ -414,8 +424,8 @@ loadstring(game:HttpGet(%q))()
 		math.floor(tonumber(config.CarpetSpeed) or 150),
 		tostring(config.UseGrapple == true),
 		tostring(config.ServerHopEnabled == true),
-		math.floor(tonumber(config.ServerHopStartDelay) or 20),
-		math.floor(tonumber(config.ServerHopIdleSeconds) or 8),
+		math.floor(tonumber(config.ServerHopStartDelay) or 3),
+		math.floor(tonumber(config.ServerHopIdleSeconds) or 2),
 		LOADSTRING_URL
 	)
 
@@ -442,7 +452,7 @@ local function findLowestPopulationServer()
 	local bestUnvisited
 	local bestAny
 	local cursor
-	local maxPages = math.clamp(tonumber(config.ServerHopMaxPages) or 3, 1, 10)
+	local maxPages = math.clamp(tonumber(config.ServerHopMaxPages) or 1, 1, 10)
 
 	local function isBetter(candidate, currentBest)
 		return not currentBest
@@ -1266,18 +1276,18 @@ while not session.cancelled do
 				local now = os.clock()
 				local waitAnchor = sawHoneyThisServer and lastHoneyActivity or automationStartedAt
 				local requiredIdle = sawHoneyThisServer
-					and (tonumber(config.ServerHopIdleSeconds) or 8)
-					or (tonumber(config.ServerHopStartDelay) or 20)
+					and (tonumber(config.ServerHopIdleSeconds) or 2)
+					or (tonumber(config.ServerHopStartDelay) or 3)
 				local remaining = math.max(0, requiredIdle - (now - waitAnchor))
 				local retryReady = now - lastHopAttempt
-					>= (tonumber(config.ServerHopRetrySeconds) or 10)
+					>= (tonumber(config.ServerHopRetrySeconds) or 3)
 
 				if config.ServerHopEnabled and remaining <= 0 and retryReady then
 					hopToLowestPopulationServer()
 				elseif config.ServerHopEnabled then
 					local displayedRemaining = math.ceil(math.max(
 						remaining,
-						(tonumber(config.ServerHopRetrySeconds) or 10) - (now - lastHopAttempt)
+						(tonumber(config.ServerHopRetrySeconds) or 3) - (now - lastHopAttempt)
 					))
 					if displayedRemaining ~= lastHopCountdown then
 						lastHopCountdown = displayedRemaining
