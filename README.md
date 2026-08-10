@@ -14,7 +14,7 @@ Your client must support `loadstring` and `game:HttpGet`.
 - Detects the Bee event's live `Honey` models by their hidden claim prompt.
 - Detects whether the Bee event is active from the controller's hive state, with live event models and the bottom-right Bee icon as fallbacks. The UI header shows `ACTIVE`, `INACTIVE`, or `CHECKING`.
 - Fires the Grapple Hook, equips a supported carpet, and glides at a default speed of 150.
-- Precomputes an obstacle-aware waypoint route and follows it around walls instead of pushing straight through structures.
+- Precomputes a multi-wall grid route, checks every player-width segment, and follows it around structures instead of pushing through them. Unsafe routes are rejected.
 - Automatically stops within the game's 12-stud claim range.
 - Includes automation controls, live status, speed editing, and a click-to-select teleport test.
 - While the Bee event is confirmed active, finds the lowest-population non-full public server and hops after all available Honey has been handled. It never hops while the event is inactive or still being confirmed.
@@ -41,7 +41,10 @@ _G.AutoHoneyPickupConfig = {
     UseGrapple = true,
     UsePathfinding = true,
     PathAgentRadius = 4,
-    PathWaypointReach = 3.5,
+    PathWaypointReach = 1.5,
+    PathGridSize = 8,
+    PathGridMargin = 80,
+    PathMaxGridNodes = 6000,
     ServerHopEnabled = true,
     ServerHopStartDelay = 5,
     ServerHopIdleSeconds = 2,

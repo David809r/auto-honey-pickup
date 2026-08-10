@@ -70,7 +70,10 @@ if config.PreferredCarpet == nil then config.PreferredCarpet = "Flying Carpet" e
 if config.UseGrapple == nil then config.UseGrapple = true end
 if config.UsePathfinding == nil then config.UsePathfinding = true end
 if config.PathAgentRadius == nil then config.PathAgentRadius = 4 end
-if config.PathWaypointReach == nil then config.PathWaypointReach = 3.5 end
+if config.PathWaypointReach == nil then config.PathWaypointReach = 1.5 end
+if config.PathGridSize == nil then config.PathGridSize = 8 end
+if config.PathGridMargin == nil then config.PathGridMargin = 80 end
+if config.PathMaxGridNodes == nil then config.PathMaxGridNodes = 6000 end
 if config.ServerHopEnabled == nil then config.ServerHopEnabled = true end
 if config.ServerHopStartDelay == nil then config.ServerHopStartDelay = 5 end
 if config.ServerHopIdleSeconds == nil then config.ServerHopIdleSeconds = 2 end
@@ -79,15 +82,18 @@ if config.ServerHopMaxPages == nil then config.ServerHopMaxPages = 1 end
 if config.RequeueOnTeleport == nil then config.RequeueOnTeleport = true end
 if config.BeeEventCheckInterval == nil then config.BeeEventCheckInterval = 0.5 end
 
--- Version 5 keeps the fast event cadence, gives the Bee controller five
--- seconds to restore its state, and adds direct Bee-event state detection.
+-- Version 6 keeps the event/hopper cadence and migrates existing sessions to
+-- tighter waypoint arrival so carpet movement cannot cut across wall corners.
 if previousInternalVersion < 4 then
 	config.ServerHopStartDelay = 5
 	config.ServerHopIdleSeconds = 2
 	config.ServerHopRetrySeconds = 3
 	config.ServerHopMaxPages = 1
 end
-config.InternalVersion = 5
+if previousInternalVersion < 6 then
+	config.PathWaypointReach = 1.5
+end
+config.InternalVersion = 6
 
 local trackedJars = {}
 local warnedMissingCarpet = false
@@ -364,7 +370,7 @@ local function findBlockingObstacle(origin, target, jar)
 	local rayOrigin = origin
 
 	-- Skip non-collidable decoration until a real wall/structure is reached.
-	for _ = 1, 16 do
+	for _ = 1, 64 do
 		params.FilterDescendantsInstances = ignore
 		local remaining = target - rayOrigin
 		if remaining.Magnitude < 0.05 then
@@ -422,6 +428,246 @@ local function getGroundRoutePosition(position, jar)
 	return position
 end
 
+local function isRoutePointClear(position, jar)
+	local clearance = math.clamp(tonumber(config.PathAgentRadius) or 4, 2, 8)
+	local params = OverlapParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = getPathIgnoreList(jar)
+
+	-- Keep the volume above the floor so the floor itself is not treated as a
+	-- wall, while still rejecting wall/building parts occupying player space.
+	local parts = Workspace:GetPartBoundsInBox(
+		CFrame.new(position + Vector3.new(0, 2, 0)),
+		Vector3.new(clearance * 2, 4, clearance * 2),
+		params
+	)
+	for _, part in ipairs(parts) do
+		if part.CanCollide then
+			return false
+		end
+	end
+	return true
+end
+
+local function areRouteSegmentsClear(fromPosition, route, jar)
+	local previous = fromPosition
+	for _, waypoint in ipairs(route) do
+		if not isFlightSegmentClear(previous, waypoint, jar) then
+			return false
+		end
+		previous = waypoint
+	end
+	return true
+end
+
+local function simplifyTravelRoute(fromPosition, route, jar)
+	local points = { fromPosition }
+	for _, waypoint in ipairs(route) do
+		points[#points + 1] = waypoint
+	end
+
+	local simplified = {}
+	local index = 1
+	while index < #points do
+		local candidate = #points
+		while candidate > index + 1
+			and not isFlightSegmentClear(points[index], points[candidate], jar)
+		do
+			candidate -= 1
+		end
+		simplified[#simplified + 1] = points[candidate]
+		index = candidate
+	end
+	return simplified
+end
+
+local function computeGridRoute(fromPosition, targetPosition, jar)
+	local cellSize = math.clamp(tonumber(config.PathGridSize) or 8, 6, 14)
+	local margin = math.clamp(tonumber(config.PathGridMargin) or 80, 32, 160)
+	local maxExpanded = math.clamp(tonumber(config.PathMaxGridNodes) or 6000, 1000, 12000)
+	local targetGridX = math.round((targetPosition.X - fromPosition.X) / cellSize)
+	local targetGridZ = math.round((targetPosition.Z - fromPosition.Z) / cellSize)
+	local padding = math.ceil(margin / cellSize)
+	local minX = math.min(0, targetGridX) - padding
+	local maxX = math.max(0, targetGridX) + padding
+	local minZ = math.min(0, targetGridZ) - padding
+	local maxZ = math.max(0, targetGridZ) + padding
+	local startKey = "0:0"
+
+	local function keyFor(x, z)
+		return tostring(x) .. ":" .. tostring(z)
+	end
+
+	local function pointFor(x, z)
+		return Vector3.new(
+			fromPosition.X + x * cellSize,
+			fromPosition.Y,
+			fromPosition.Z + z * cellSize
+		)
+	end
+
+	local function heuristic(x, z)
+		local dx = targetGridX - x
+		local dz = targetGridZ - z
+		return math.sqrt(dx * dx + dz * dz)
+	end
+
+	local heap = {}
+	local function heapPush(node)
+		heap[#heap + 1] = node
+		local index = #heap
+		while index > 1 do
+			local parent = math.floor(index / 2)
+			if heap[parent].f <= node.f then
+				break
+			end
+			heap[index] = heap[parent]
+			index = parent
+		end
+		heap[index] = node
+	end
+
+	local function heapPop()
+		if #heap == 0 then
+			return nil
+		end
+		local first = heap[1]
+		local last = table.remove(heap)
+		if #heap > 0 then
+			local index = 1
+			while true do
+				local left = index * 2
+				local right = left + 1
+				if left > #heap then
+					break
+				end
+				local child = right <= #heap and heap[right].f < heap[left].f and right or left
+				if heap[child].f >= last.f then
+					break
+				end
+				heap[index] = heap[child]
+				index = child
+			end
+			heap[index] = last
+		end
+		return first
+	end
+
+	local scores = { [startKey] = 0 }
+	local parents = {}
+	local coordinates = { [startKey] = { 0, 0 } }
+	local pointClearCache = { [startKey] = true }
+	local edgeClearCache = {}
+	local closed = {}
+	local expanded = 0
+	local goalKey
+	heapPush({ key = startKey, x = 0, z = 0, g = 0, f = heuristic(0, 0) })
+
+	local directions = {
+		{ 1, 0, 1 }, { -1, 0, 1 }, { 0, 1, 1 }, { 0, -1, 1 },
+		{ 1, 1, 1.414 }, { 1, -1, 1.414 }, { -1, 1, 1.414 }, { -1, -1, 1.414 },
+	}
+
+	while #heap > 0 and expanded < maxExpanded do
+		local current = heapPop()
+		if closed[current.key] or current.g ~= scores[current.key] then
+			continue
+		end
+		closed[current.key] = true
+		expanded += 1
+		if expanded % 150 == 0 then
+			RunService.Heartbeat:Wait()
+			if session.cancelled then
+				return nil
+			end
+		end
+
+		local currentPoint = pointFor(current.x, current.z)
+		local flatToTarget = Vector3.new(
+			targetPosition.X - currentPoint.X,
+			0,
+			targetPosition.Z - currentPoint.Z
+		)
+		if flatToTarget.Magnitude <= cellSize * 1.75
+			and isFlightSegmentClear(currentPoint, targetPosition, jar)
+		then
+			goalKey = current.key
+			break
+		end
+
+		for _, direction in ipairs(directions) do
+			local nextX = current.x + direction[1]
+			local nextZ = current.z + direction[2]
+			if nextX < minX or nextX > maxX or nextZ < minZ or nextZ > maxZ then
+				continue
+			end
+
+			local nextKey = keyFor(nextX, nextZ)
+			if closed[nextKey] then
+				continue
+			end
+
+			local nextPoint = pointFor(nextX, nextZ)
+			if pointClearCache[nextKey] == nil then
+				pointClearCache[nextKey] = isRoutePointClear(nextPoint, jar)
+			end
+			if not pointClearCache[nextKey] then
+				continue
+			end
+
+			local edgeKey = current.key < nextKey
+				and (current.key .. "|" .. nextKey)
+				or (nextKey .. "|" .. current.key)
+			if edgeClearCache[edgeKey] == nil then
+				edgeClearCache[edgeKey] = isFlightSegmentClear(currentPoint, nextPoint, jar)
+			end
+			if not edgeClearCache[edgeKey] then
+				continue
+			end
+
+			local nextScore = current.g + direction[3]
+			if scores[nextKey] == nil or nextScore < scores[nextKey] then
+				scores[nextKey] = nextScore
+				parents[nextKey] = current.key
+				coordinates[nextKey] = { nextX, nextZ }
+				heapPush({
+					key = nextKey,
+					x = nextX,
+					z = nextZ,
+					g = nextScore,
+					f = nextScore + heuristic(nextX, nextZ),
+				})
+			end
+		end
+	end
+
+	if not goalKey then
+		log("Grid route exhausted after", expanded, "nodes")
+		return nil
+	end
+
+	local reverseRoute = {}
+	local currentKey = goalKey
+	while currentKey and currentKey ~= startKey do
+		local coordinate = coordinates[currentKey]
+		reverseRoute[#reverseRoute + 1] = pointFor(coordinate[1], coordinate[2])
+		currentKey = parents[currentKey]
+	end
+
+	local route = {}
+	for index = #reverseRoute, 1, -1 do
+		route[#route + 1] = reverseRoute[index]
+	end
+	route[#route + 1] = targetPosition
+	route = simplifyTravelRoute(fromPosition, route, jar)
+	if not areRouteSegmentsClear(fromPosition, route, jar) then
+		return nil
+	end
+
+	log("Grid route expanded", expanded, "nodes")
+	return route
+end
+
 local function computeTravelRoute(fromPosition, targetPosition, jar, routeLabel)
 	routeLabel = routeLabel or "Honey"
 	if not config.UsePathfinding or isFlightSegmentClear(fromPosition, targetPosition, jar) then
@@ -432,42 +678,50 @@ local function computeTravelRoute(fromPosition, targetPosition, jar, routeLabel)
 		string.format("Wall detected - planning %s route", routeLabel),
 		Color3.fromRGB(251, 191, 36)
 	)
-	local startPosition = getGroundRoutePosition(fromPosition, jar)
-	local endPosition = getGroundRoutePosition(targetPosition, jar)
-	local path = PathfindingService:CreatePath({
-		AgentRadius = math.clamp(tonumber(config.PathAgentRadius) or 4, 2, 8),
-		AgentHeight = 5,
-		AgentCanJump = true,
-		AgentCanClimb = true,
-		AgentJumpHeight = 10,
-		AgentMaxSlope = 89,
-		WaypointSpacing = 5,
-	})
+	local route = computeGridRoute(fromPosition, targetPosition, jar)
+	if not route then
+		-- Roblox navigation remains a fallback, but every returned segment must
+		-- pass our own clearance rays before the carpet is allowed to move.
+		local startPosition = getGroundRoutePosition(fromPosition, jar)
+		local endPosition = getGroundRoutePosition(targetPosition, jar)
+		local path = PathfindingService:CreatePath({
+			AgentRadius = math.clamp(tonumber(config.PathAgentRadius) or 4, 2, 8),
+			AgentHeight = 5,
+			AgentCanJump = true,
+			AgentCanClimb = true,
+			AgentJumpHeight = 10,
+			AgentMaxSlope = 89,
+			WaypointSpacing = 5,
+		})
 
-	local computed = pcall(function()
-		path:ComputeAsync(startPosition, endPosition)
-	end)
-	if not computed or path.Status ~= Enum.PathStatus.Success then
-		log("Pathfinding failed", path.Status.Name)
-		return nil, true
-	end
+		local computed = pcall(function()
+			path:ComputeAsync(startPosition, endPosition)
+		end)
+		if computed and path.Status == Enum.PathStatus.Success then
+			route = {}
+			for index, waypoint in ipairs(path:GetWaypoints()) do
+				if index > 1 then
+					local lift = waypoint.Action == Enum.PathWaypointAction.Jump and 5 or 3
+					route[#route + 1] = waypoint.Position + Vector3.new(0, lift, 0)
+				end
+			end
 
-	local route = {}
-	for index, waypoint in ipairs(path:GetWaypoints()) do
-		if index > 1 then
-			local lift = waypoint.Action == Enum.PathWaypointAction.Jump and 5 or 3
-			route[#route + 1] = waypoint.Position + Vector3.new(0, lift, 0)
+			if #route > 0 then
+				route[#route + 1] = targetPosition
+				route = simplifyTravelRoute(fromPosition, route, jar)
+				if not areRouteSegmentsClear(fromPosition, route, jar) then
+					route = nil
+				end
+			else
+				route = nil
+			end
+		else
+			log("Roblox pathfinding fallback failed", path.Status.Name)
 		end
 	end
 
-	if #route == 0 then
+	if not route then
 		return nil, true
-	end
-
-	if (route[#route] - targetPosition).Magnitude > 1 then
-		route[#route + 1] = targetPosition
-	else
-		route[#route] = targetPosition
 	end
 
 	log("Planned", routeLabel, "route with", #route, "waypoints")
@@ -660,6 +914,9 @@ _G.AutoHoneyPickupConfig = {
 	UsePathfinding = %s,
 	PathAgentRadius = %.2f,
 	PathWaypointReach = %.2f,
+	PathGridSize = %.2f,
+	PathGridMargin = %.2f,
+	PathMaxGridNodes = %d,
 	ServerHopEnabled = %s,
 	ServerHopStartDelay = %d,
 	ServerHopIdleSeconds = %d,
@@ -674,7 +931,10 @@ loadstring(game:HttpGet(%q))()
 		tostring(config.UseGrapple == true),
 		tostring(config.UsePathfinding == true),
 		math.clamp(tonumber(config.PathAgentRadius) or 4, 2, 8),
-		math.clamp(tonumber(config.PathWaypointReach) or 3.5, 2, 6),
+		math.clamp(tonumber(config.PathWaypointReach) or 1.5, 0.75, 4),
+		math.clamp(tonumber(config.PathGridSize) or 8, 6, 14),
+		math.clamp(tonumber(config.PathGridMargin) or 80, 32, 160),
+		math.floor(math.clamp(tonumber(config.PathMaxGridNodes) or 6000, 1000, 12000)),
 		tostring(config.ServerHopEnabled == true),
 		math.floor(tonumber(config.ServerHopStartDelay) or 5),
 		math.floor(tonumber(config.ServerHopIdleSeconds) or 2),
@@ -1018,8 +1278,9 @@ local function flyToJar(jar, useGrappleEngage)
 	local lastWaypointDistance = math.huge
 	local stalledFrames = 0
 	local nextEquipAt = 0
+	local nextSegmentCheckAt = 0
 	local flightSpeed = math.max(1, tonumber(config.CarpetSpeed) or 150)
-	local waypointReach = math.clamp(tonumber(config.PathWaypointReach) or 3.5, 2, 6)
+	local waypointReach = math.clamp(tonumber(config.PathWaypointReach) or 1.5, 0.75, 4)
 	local replans = 0
 
 	while os.clock() - startedAt < config.FlightTimeout do
@@ -1083,6 +1344,34 @@ local function flyToJar(jar, useGrappleEngage)
 			waypointDistance = waypointOffset.Magnitude
 			lastWaypointDistance = math.huge
 			stalledFrames = 0
+		end
+
+		if os.clock() >= nextSegmentCheckAt then
+			nextSegmentCheckAt = os.clock() + 0.2
+			if not isFlightSegmentClear(root.Position, waypoint, jar) then
+				if replans >= 2 then
+					stopMovement()
+					return "no_path"
+				end
+				local newRoute, newUsedPathfinding = computeTravelRoute(
+					root.Position,
+					targetPosition,
+					jar,
+					"Honey"
+				)
+				if not newRoute then
+					stopMovement()
+					return "no_path"
+				end
+				route = newRoute
+				usedPathfinding = newUsedPathfinding
+				waypointIndex = 1
+				plannedTarget = targetPosition
+				lastWaypointDistance = math.huge
+				stalledFrames = 0
+				replans += 1
+				continue
+			end
 		end
 
 		if os.clock() >= nextEquipAt then
@@ -1152,11 +1441,13 @@ local function flyToTestPoint(worldPosition)
 	end
 
 	local speed = math.max(1, tonumber(config.CarpetSpeed) or 150)
-	local waypointReach = math.clamp(tonumber(config.PathWaypointReach) or 3.5, 2, 6)
+	local waypointReach = math.clamp(tonumber(config.PathWaypointReach) or 1.5, 0.75, 4)
 	local waypointIndex = 1
 	local lastWaypointDistance = math.huge
 	local stalledFrames = 0
 	local nextEquipAt = 0
+	local nextSegmentCheckAt = 0
+	local replans = 0
 	local deadline = os.clock() + config.FlightTimeout
 
 	while os.clock() < deadline do
@@ -1185,6 +1476,27 @@ local function flyToTestPoint(worldPosition)
 			waypointDistance = waypointOffset.Magnitude
 			lastWaypointDistance = math.huge
 			stalledFrames = 0
+		end
+
+		if os.clock() >= nextSegmentCheckAt then
+			nextSegmentCheckAt = os.clock() + 0.2
+			if not isFlightSegmentClear(root.Position, waypoint, nil) then
+				if replans >= 2 then
+					stopMovement()
+					return false, "Test route became blocked"
+				end
+				local newRoute = computeTravelRoute(root.Position, destination, nil, "Test")
+				if not newRoute then
+					stopMovement()
+					return false, "No safe path to test destination"
+				end
+				route = newRoute
+				waypointIndex = 1
+				lastWaypointDistance = math.huge
+				stalledFrames = 0
+				replans += 1
+				continue
+			end
 		end
 
 		if os.clock() >= nextEquipAt then
