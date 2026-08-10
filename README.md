@@ -15,6 +15,8 @@ Your client must support `loadstring` and `game:HttpGet`.
 - Fires the Grapple Hook, equips a supported carpet, and glides at a default speed of 150.
 - Automatically stops within the game's 12-stud claim range.
 - Includes automation controls, live status, speed editing, and a click-to-select teleport test.
+- Finds the lowest-population non-full public server and hops after all available Honey has been handled.
+- Carries a short visited-server list through teleport data and re-queues the loadstring when the executor supports it.
 - Cleans up an older running copy when executed again.
 
 ## Test teleport
@@ -34,8 +36,13 @@ _G.AutoHoneyPickupConfig = {
     Enabled = true,
     CarpetSpeed = 150,
     UseGrapple = true,
+    ServerHopEnabled = true,
+    ServerHopStartDelay = 20,
+    ServerHopIdleSeconds = 8,
     Debug = false,
 }
 
 loadstring(game:HttpGet("https://raw.githubusercontent.com/David809r/auto-honey-pickup/main/autohoneypickup.lua"))()
 ```
+
+The hopper waits 20 seconds on a fresh server when no Honey has appeared. After Honey is detected, it waits for 8 seconds with no available pickup before choosing another server. Teleports must be tested in the Roblox application; Roblox Studio playtesting does not support `TeleportService`.

@@ -8,7 +8,9 @@ end
 
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
+local HttpService = game:GetService("HttpService")
 local RunService = game:GetService("RunService")
+local TeleportService = game:GetService("TeleportService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 
@@ -41,6 +43,7 @@ local session = {
 	cancelled = false,
 	connections = {},
 	testActive = false,
+	serverHopActive = false,
 }
 _G.AutoHoneyPickupSession = session
 
@@ -63,11 +66,39 @@ if config.CarpetSpeed == nil then config.CarpetSpeed = 150 end
 config.InternalVersion = 2
 if config.PreferredCarpet == nil then config.PreferredCarpet = "Flying Carpet" end
 if config.UseGrapple == nil then config.UseGrapple = true end
+if config.ServerHopEnabled == nil then config.ServerHopEnabled = true end
+if config.ServerHopStartDelay == nil then config.ServerHopStartDelay = 20 end
+if config.ServerHopIdleSeconds == nil then config.ServerHopIdleSeconds = 8 end
+if config.ServerHopRetrySeconds == nil then config.ServerHopRetrySeconds = 10 end
+if config.ServerHopMaxPages == nil then config.ServerHopMaxPages = 3 end
+if config.RequeueOnTeleport == nil then config.RequeueOnTeleport = true end
 
 local trackedJars = {}
 local warnedMissingCarpet = false
 local warnedMissingGrapple = false
 local updateUIStatus = function() end
+local automationStartedAt = os.clock()
+local lastHoneyActivity = automationStartedAt
+local sawHoneyThisServer = false
+local lastHopAttempt = -math.huge
+local lastHopCountdown
+local LOADSTRING_URL = "https://raw.githubusercontent.com/David809r/auto-honey-pickup/main/autohoneypickup.lua"
+local visitedServers = {}
+
+pcall(function()
+	local teleportData = TeleportService:GetLocalPlayerTeleportData()
+	if type(teleportData) == "table" and type(teleportData.AutoHoneyVisitedServers) == "table" then
+		for _, serverId in ipairs(teleportData.AutoHoneyVisitedServers) do
+			if type(serverId) == "string" then
+				visitedServers[serverId] = true
+			end
+		end
+	end
+end)
+
+if game.JobId ~= "" then
+	visitedServers[game.JobId] = true
+end
 local CARPET_NAMES = {
 	"Flying Carpet",
 	"Carpet",
@@ -198,6 +229,9 @@ local function trackJar(instance)
 	if isHoneyJar(instance) and getJarPosition(instance) then
 		if trackedJars[instance] == nil then
 			trackedJars[instance] = 0
+			sawHoneyThisServer = true
+			lastHoneyActivity = os.clock()
+			lastHopCountdown = nil
 			log("Found", instance:GetFullName())
 		end
 	end
@@ -341,6 +375,192 @@ local function stopMovement()
 		root.AssemblyLinearVelocity = Vector3.zero
 		root.AssemblyAngularVelocity = Vector3.zero
 	end
+end
+
+local function queueScriptForTeleport()
+	if not config.RequeueOnTeleport then
+		return false
+	end
+
+	local environment = _G
+	if type(getgenv) == "function" then
+		pcall(function()
+			environment = getgenv()
+		end)
+	end
+
+	local queueFunction = (environment and environment.queue_on_teleport)
+		or queue_on_teleport
+		or (syn and syn.queue_on_teleport)
+		or (fluxus and fluxus.queue_on_teleport)
+
+	if type(queueFunction) ~= "function" then
+		return false
+	end
+
+	local queuedSource = string.format([[
+_G.AutoHoneyPickupConfig = {
+	Enabled = %s,
+	CarpetSpeed = %d,
+	UseGrapple = %s,
+	ServerHopEnabled = %s,
+	ServerHopStartDelay = %d,
+	ServerHopIdleSeconds = %d,
+	RequeueOnTeleport = true,
+}
+loadstring(game:HttpGet(%q))()
+]],
+		tostring(config.Enabled == true),
+		math.floor(tonumber(config.CarpetSpeed) or 150),
+		tostring(config.UseGrapple == true),
+		tostring(config.ServerHopEnabled == true),
+		math.floor(tonumber(config.ServerHopStartDelay) or 20),
+		math.floor(tonumber(config.ServerHopIdleSeconds) or 8),
+		LOADSTRING_URL
+	)
+
+	return pcall(queueFunction, queuedSource)
+end
+
+local function getVisitedServerList(extraServerId)
+	local result = {}
+	if type(extraServerId) == "string" and extraServerId ~= "" then
+		visitedServers[extraServerId] = true
+	end
+
+	for serverId in pairs(visitedServers) do
+		result[#result + 1] = serverId
+		if #result >= 40 then
+			break
+		end
+	end
+
+	return result
+end
+
+local function findLowestPopulationServer()
+	local bestUnvisited
+	local bestAny
+	local cursor
+	local maxPages = math.clamp(tonumber(config.ServerHopMaxPages) or 3, 1, 10)
+
+	local function isBetter(candidate, currentBest)
+		return not currentBest
+			or candidate.playing < currentBest.playing
+			or (candidate.playing == currentBest.playing and candidate.id < currentBest.id)
+	end
+
+	for _ = 1, maxPages do
+		local url = string.format(
+			"https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&excludeFullGames=true&limit=100",
+			game.PlaceId
+		)
+
+		if cursor and cursor ~= "" then
+			url ..= "&cursor=" .. HttpService:UrlEncode(cursor)
+		end
+
+		local requestOk, body = pcall(function()
+			return game:HttpGet(url)
+		end)
+
+		if not requestOk or type(body) ~= "string" then
+			return nil, "Public server request failed"
+		end
+
+		local decodeOk, response = pcall(HttpService.JSONDecode, HttpService, body)
+		if not decodeOk or type(response) ~= "table" or type(response.data) ~= "table" then
+			return nil, "Invalid public server response"
+		end
+
+		for _, server in ipairs(response.data) do
+			local serverId = server.id
+			local playing = tonumber(server.playing)
+			local capacity = tonumber(server.maxPlayers)
+
+			if type(serverId) == "string"
+				and serverId ~= ""
+				and serverId ~= game.JobId
+				and playing
+				and capacity
+				and playing < capacity
+			then
+				local candidate = { id = serverId, playing = playing, capacity = capacity }
+				if isBetter(candidate, bestAny) then
+					bestAny = candidate
+				end
+				if not visitedServers[serverId] and isBetter(candidate, bestUnvisited) then
+					bestUnvisited = candidate
+				end
+			end
+		end
+
+		cursor = response.nextPageCursor
+		if not cursor or cursor == "" then
+			break
+		end
+	end
+
+	-- Prefer a new server. If every low-population candidate has already been
+	-- visited, reuse the lowest one rather than getting permanently stuck.
+	return bestUnvisited or bestAny, bestUnvisited and nil or "Visited pool exhausted"
+end
+
+local function hopToLowestPopulationServer()
+	if session.serverHopActive or session.testActive or session.cancelled then
+		return false
+	end
+
+	session.serverHopActive = true
+	lastHopAttempt = os.clock()
+	stopMovement()
+	updateUIStatus("Finding lowest-player public server", Color3.fromRGB(251, 191, 36))
+
+	local server, lookupNote = findLowestPopulationServer()
+	if not server then
+		session.serverHopActive = false
+		updateUIStatus(lookupNote or "No public server found", Color3.fromRGB(248, 113, 113))
+		return false
+	end
+
+	local queued = queueScriptForTeleport()
+	if not queued then
+		warn("[AutoHoneyPickup] queue_on_teleport is unavailable; the script may need to be run again after hopping.")
+	end
+
+	visitedServers[server.id] = true
+	local teleportData = {
+		AutoHoneyVisitedServers = getVisitedServerList(server.id),
+	}
+
+	updateUIStatus(
+		string.format("Hopping to %d/%d player server", server.playing, server.capacity),
+		Color3.fromRGB(147, 197, 253)
+	)
+
+	local teleportOk, teleportError = pcall(function()
+		-- TeleportAsync is server-only. TeleportToPlaceInstance remains the
+		-- client-capable API for joining a chosen public instance.
+		TeleportService:TeleportToPlaceInstance(
+			game.PlaceId,
+			server.id,
+			LocalPlayer,
+			"",
+			teleportData
+		)
+	end)
+
+	if not teleportOk then
+		session.serverHopActive = false
+		warn("[AutoHoneyPickup] Server hop failed:", teleportError)
+		updateUIStatus("Server hop failed - retrying later", Color3.fromRGB(248, 113, 113))
+		return false
+	end
+
+	if lookupNote then
+		log(lookupNote)
+	end
+	return true
 end
 
 local function getClosestJar(root)
@@ -721,7 +941,8 @@ local function createControlPanel()
 		end
 	end
 
-	local automationButton = makeButton("", 14, 66, 204, 40, Color3.fromRGB(22, 101, 52))
+	local automationButton = makeButton("", 14, 66, 98, 40, Color3.fromRGB(22, 101, 52))
+	local hopperButton = makeButton("", 120, 66, 98, 40, Color3.fromRGB(30, 64, 175))
 	makeLabel("SPEED", 230, 64, 96, 14, 9, Color3.fromRGB(128, 148, 180), true)
 
 	local speedBox = Instance.new("TextBox")
@@ -741,12 +962,19 @@ local function createControlPanel()
 	speedCorner.Parent = speedBox
 
 	local function renderAutomation()
-		automationButton.Text = config.Enabled and "AUTOMATION: ON" or "AUTOMATION: OFF"
+		automationButton.Text = config.Enabled and "AUTO: ON" or "AUTO: OFF"
 		automationButton.BackgroundColor3 = config.Enabled
 			and Color3.fromRGB(22, 101, 52)
 			or Color3.fromRGB(71, 85, 105)
 	end
+	local function renderHopper()
+		hopperButton.Text = config.ServerHopEnabled and "HOPPER: ON" or "HOPPER: OFF"
+		hopperButton.BackgroundColor3 = config.ServerHopEnabled
+			and Color3.fromRGB(30, 64, 175)
+			or Color3.fromRGB(71, 85, 105)
+	end
 	renderAutomation()
+	renderHopper()
 
 	local sectionLine = Instance.new("Frame")
 	sectionLine.Position = UDim2.fromOffset(14, 120)
@@ -837,6 +1065,18 @@ local function createControlPanel()
 			end
 			updateUIStatus("Automation paused", Color3.fromRGB(148, 163, 184))
 		end
+	end))
+
+	table.insert(session.connections, hopperButton.Activated:Connect(function()
+		config.ServerHopEnabled = not config.ServerHopEnabled
+		renderHopper()
+		lastHoneyActivity = os.clock()
+		lastHopAttempt = -math.huge
+		lastHopCountdown = nil
+		updateUIStatus(
+			config.ServerHopEnabled and "Server hopper enabled" or "Server hopper disabled",
+			config.ServerHopEnabled and Color3.fromRGB(147, 197, 253) or Color3.fromRGB(148, 163, 184)
+		)
 	end))
 
 	table.insert(session.connections, speedBox.FocusLost:Connect(function()
@@ -984,6 +1224,20 @@ table.insert(session.connections, Workspace.DescendantAdded:Connect(inspectAdded
 table.insert(session.connections, Workspace.DescendantRemoving:Connect(function(instance)
 	if trackedJars[instance] then
 		trackedJars[instance] = nil
+		lastHoneyActivity = os.clock()
+	end
+end))
+
+table.insert(session.connections, TeleportService.TeleportInitFailed:Connect(function(
+	player,
+	_,
+	errorMessage
+)
+	if player == LocalPlayer and session.serverHopActive then
+		session.serverHopActive = false
+		lastHopAttempt = os.clock()
+		warn("[AutoHoneyPickup] Teleport initialization failed:", errorMessage)
+		updateUIStatus("Teleport failed - retrying later", Color3.fromRGB(248, 113, 113))
 	end
 end))
 
@@ -992,6 +1246,8 @@ print("[AutoHoneyPickup] Running - waiting for Bee event Honey spawns.")
 
 while not session.cancelled do
 	if session.testActive then
+		task.wait(0.1)
+	elseif session.serverHopActive then
 		task.wait(0.1)
 	elseif not config.Enabled then
 		stopMovement()
@@ -1007,6 +1263,31 @@ while not session.cancelled do
 			if jar then
 				collectJar(jar)
 			else
+				local now = os.clock()
+				local waitAnchor = sawHoneyThisServer and lastHoneyActivity or automationStartedAt
+				local requiredIdle = sawHoneyThisServer
+					and (tonumber(config.ServerHopIdleSeconds) or 8)
+					or (tonumber(config.ServerHopStartDelay) or 20)
+				local remaining = math.max(0, requiredIdle - (now - waitAnchor))
+				local retryReady = now - lastHopAttempt
+					>= (tonumber(config.ServerHopRetrySeconds) or 10)
+
+				if config.ServerHopEnabled and remaining <= 0 and retryReady then
+					hopToLowestPopulationServer()
+				elseif config.ServerHopEnabled then
+					local displayedRemaining = math.ceil(math.max(
+						remaining,
+						(tonumber(config.ServerHopRetrySeconds) or 10) - (now - lastHopAttempt)
+					))
+					if displayedRemaining ~= lastHopCountdown then
+						lastHopCountdown = displayedRemaining
+						updateUIStatus(
+							string.format("No available Honey - hopping in %ds", displayedRemaining),
+							Color3.fromRGB(148, 163, 184)
+						)
+					end
+				end
+
 				task.wait(config.ScanInterval)
 			end
 		end
