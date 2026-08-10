@@ -73,26 +73,31 @@ if config.ServerHopIdleSeconds == nil then config.ServerHopIdleSeconds = 2 end
 if config.ServerHopRetrySeconds == nil then config.ServerHopRetrySeconds = 3 end
 if config.ServerHopMaxPages == nil then config.ServerHopMaxPages = 1 end
 if config.RequeueOnTeleport == nil then config.RequeueOnTeleport = true end
+if config.BeeEventCheckInterval == nil then config.BeeEventCheckInterval = 0.5 end
 
--- Version 4 keeps the fast event cadence but gives the Bee controller five
--- seconds to restore its state before an empty-server hop can begin.
+-- Version 5 keeps the fast event cadence, gives the Bee controller five
+-- seconds to restore its state, and adds direct Bee-event state detection.
 if previousInternalVersion < 4 then
 	config.ServerHopStartDelay = 5
 	config.ServerHopIdleSeconds = 2
 	config.ServerHopRetrySeconds = 3
 	config.ServerHopMaxPages = 1
 end
-config.InternalVersion = 4
+config.InternalVersion = 5
 
 local trackedJars = {}
 local warnedMissingCarpet = false
 local warnedMissingGrapple = false
 local updateUIStatus = function() end
+local updateBeeEventIndicator = function() end
 local automationStartedAt = os.clock()
 local lastHoneyActivity = automationStartedAt
 local sawHoneyThisServer = false
 local lastHopAttempt = -math.huge
 local lastHopCountdown
+local lastBeeEventCheck = -math.huge
+local cachedBeeEventActive
+local cachedBeeEventSource = "checking"
 local LOADSTRING_URL = "https://raw.githubusercontent.com/David809r/auto-honey-pickup/main/autohoneypickup.lua"
 local visitedServers = {}
 
@@ -190,6 +195,98 @@ local function isHoneyJar(instance)
 		or instance:IsA("BasePart")
 		or instance:IsA("Attachment")
 		or instance:IsA("Folder")
+end
+
+local function hasVisibleBeeEventIcon()
+	local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	local camera = Workspace.CurrentCamera
+	if not playerGui or not camera then
+		return false
+	end
+
+	local viewport = camera.ViewportSize
+	if viewport.X <= 0 or viewport.Y <= 0 then
+		return false
+	end
+
+	for _, instance in ipairs(playerGui:GetDescendants()) do
+		if instance:IsA("GuiObject")
+			and (not session.gui or not instance:IsDescendantOf(session.gui))
+			and instance.Visible
+		then
+			local visible = true
+			local identifiesBee = false
+			local current = instance
+
+			while current and current ~= playerGui do
+				if current:IsA("GuiObject") and not current.Visible then
+					visible = false
+					break
+				elseif current:IsA("LayerCollector") and not current.Enabled then
+					visible = false
+					break
+				end
+
+				if string.find(string.lower(current.Name), "bee", 1, true) then
+					identifiesBee = true
+				end
+				current = current.Parent
+			end
+
+			if visible and identifiesBee then
+				local center = instance.AbsolutePosition + (instance.AbsoluteSize / 2)
+				if center.X >= viewport.X * 0.6 and center.Y >= viewport.Y * 0.55 then
+					return true
+				end
+			end
+		end
+	end
+
+	return false
+end
+
+local function detectBeeEvent()
+	local now = os.clock()
+	if now - lastBeeEventCheck < math.max(0.1, tonumber(config.BeeEventCheckInterval) or 0.5) then
+		return cachedBeeEventActive, cachedBeeEventSource
+	end
+	lastBeeEventCheck = now
+
+	-- The Bee EventController sets this exact part to 0 on OnStart and 1 on
+	-- OnStop. It is more reliable than depending on one particular UI layout.
+	local beehive = Workspace:FindFirstChild("Beehive")
+	local activeModel = beehive and beehive:FindFirstChild("Active")
+	local activeNeon = activeModel and activeModel:FindFirstChild("ActiveNeon")
+
+	if activeNeon and activeNeon:IsA("BasePart") then
+		cachedBeeEventActive = activeNeon.Transparency < 0.5
+		cachedBeeEventSource = "hive"
+	else
+		cachedBeeEventActive = nil
+		cachedBeeEventSource = "checking"
+	end
+
+	-- A live event Bee or Honey is an unambiguous positive signal, including
+	-- during the brief window before the hive visuals have fully replicated.
+	for _, child in ipairs(Workspace:GetChildren()) do
+		if string.sub(string.lower(child.Name), 1, 12) == "event bee - "
+			or (hasHoneyJarIdentity(child) and getClaimPrompt(child) ~= nil)
+		then
+			cachedBeeEventActive = true
+			cachedBeeEventSource = "live event model"
+			break
+		end
+	end
+
+	-- Keep the visible bottom-right Bee indicator as a fallback for places where
+	-- the Beehive model is streamed out or renamed.
+	if cachedBeeEventActive == nil and hasVisibleBeeEventIcon() then
+		cachedBeeEventActive = true
+		cachedBeeEventSource = "event UI"
+	end
+
+	updateBeeEventIndicator(cachedBeeEventActive, cachedBeeEventSource)
+	return cachedBeeEventActive, cachedBeeEventSource
 end
 
 local function getJarPosition(jar)
@@ -417,6 +514,7 @@ _G.AutoHoneyPickupConfig = {
 	ServerHopEnabled = %s,
 	ServerHopStartDelay = %d,
 	ServerHopIdleSeconds = %d,
+	BeeEventCheckInterval = %.2f,
 	RequeueOnTeleport = true,
 }
 loadstring(game:HttpGet(%q))()
@@ -427,6 +525,7 @@ loadstring(game:HttpGet(%q))()
 		tostring(config.ServerHopEnabled == true),
 		math.floor(tonumber(config.ServerHopStartDelay) or 5),
 		math.floor(tonumber(config.ServerHopIdleSeconds) or 2),
+		math.max(0.1, tonumber(config.BeeEventCheckInterval) or 0.5),
 		LOADSTRING_URL
 	)
 
@@ -998,11 +1097,28 @@ local function createControlPanel()
 	subtitle.Size = UDim2.new(1, -62, 0, 16)
 	subtitle.BackgroundTransparency = 1
 	subtitle.Font = Enum.Font.Gotham
-	subtitle.Text = "Grapple + carpet test console"
+	subtitle.Text = "BEE EVENT: CHECKING"
 	subtitle.TextColor3 = Color3.fromRGB(191, 219, 254)
 	subtitle.TextSize = 10
 	subtitle.TextXAlignment = Enum.TextXAlignment.Left
 	subtitle.Parent = header
+
+	updateBeeEventIndicator = function(active)
+		if not subtitle.Parent then
+			return
+		end
+
+		if active == true then
+			subtitle.Text = "BEE EVENT: ACTIVE"
+			subtitle.TextColor3 = Color3.fromRGB(134, 239, 172)
+		elseif active == false then
+			subtitle.Text = "BEE EVENT: INACTIVE"
+			subtitle.TextColor3 = Color3.fromRGB(253, 186, 116)
+		else
+			subtitle.Text = "BEE EVENT: CHECKING"
+			subtitle.TextColor3 = Color3.fromRGB(191, 219, 254)
+		end
+	end
 
 	local minimizeButton = Instance.new("TextButton")
 	minimizeButton.Position = UDim2.new(1, -43, 0, 11)
@@ -1385,9 +1501,12 @@ table.insert(session.connections, TeleportService.TeleportInitFailed:Connect(fun
 end))
 
 createControlPanel()
+detectBeeEvent()
 print("[AutoHoneyPickup] Running - waiting for Bee event Honey spawns.")
 
 while not session.cancelled do
+	local beeEventActive = detectBeeEvent()
+
 	if session.testActive then
 		task.wait(0.1)
 	elseif session.serverHopActive then
@@ -1424,8 +1543,10 @@ while not session.cancelled do
 					))
 					if displayedRemaining ~= lastHopCountdown then
 						lastHopCountdown = displayedRemaining
+						local eventText = beeEventActive == true and "Bee active, no Honey"
+							or (beeEventActive == false and "Bee event inactive" or "Checking Bee event")
 						updateUIStatus(
-							string.format("No available Honey - hopping in %ds", displayedRemaining),
+							string.format("%s - hopping in %ds", eventText, displayedRemaining),
 							Color3.fromRGB(148, 163, 184)
 						)
 					end
