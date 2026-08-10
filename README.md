@@ -38,6 +38,7 @@ Set options before loading the script:
 _G.AutoHoneyPickupConfig = {
     Enabled = true,
     ArrivalDistance = 4.5,
+    TestArrivalDistance = 5,
     CarpetSpeed = 150,
     UseGrapple = true,
     AntiRagdoll = true,
@@ -49,6 +50,7 @@ _G.AutoHoneyPickupConfig = {
     PathGridSize = 8,
     PathGridMargin = 80,
     PathMaxGridNodes = 6000,
+    PathStallSeconds = 1.75,
     ServerHopEnabled = true,
     ServerHopStartDelay = 5,
     ServerHopIdleSeconds = 2,

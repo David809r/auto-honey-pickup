@@ -67,6 +67,7 @@ local previousInternalVersion = tonumber(config.InternalVersion) or 0
 if config.Enabled == nil then config.Enabled = true end
 if config.Debug == nil then config.Debug = false end
 if config.ArrivalDistance == nil then config.ArrivalDistance = 4.5 end
+if config.TestArrivalDistance == nil then config.TestArrivalDistance = 5 end
 if config.ScanInterval == nil then config.ScanInterval = 0.25 end
 if config.TargetTimeout == nil then config.TargetTimeout = 30 end
 if config.FlightTimeout == nil then config.FlightTimeout = 10 end
@@ -82,6 +83,7 @@ if config.PathWaypointReach == nil then config.PathWaypointReach = 1.5 end
 if config.PathGridSize == nil then config.PathGridSize = 8 end
 if config.PathGridMargin == nil then config.PathGridMargin = 80 end
 if config.PathMaxGridNodes == nil then config.PathMaxGridNodes = 6000 end
+if config.PathStallSeconds == nil then config.PathStallSeconds = 1.75 end
 if config.ServerHopEnabled == nil then config.ServerHopEnabled = true end
 if config.ServerHopStartDelay == nil then config.ServerHopStartDelay = 5 end
 if config.ServerHopIdleSeconds == nil then config.ServerHopIdleSeconds = 2 end
@@ -90,8 +92,8 @@ if config.ServerHopMaxPages == nil then config.ServerHopMaxPages = 1 end
 if config.RequeueOnTeleport == nil then config.RequeueOnTeleport = true end
 if config.BeeEventCheckInterval == nil then config.BeeEventCheckInterval = 0.5 end
 
--- Version 7 keeps the route/hopper cadence and adds movement-scoped ragdoll
--- recovery without disabling ordinary jump/freefall states.
+-- Version 8 uses elapsed progress time instead of frame counts for stall
+-- detection, avoiding false stalls at different client frame rates.
 if previousInternalVersion < 4 then
 	config.ServerHopStartDelay = 5
 	config.ServerHopIdleSeconds = 2
@@ -101,7 +103,7 @@ end
 if previousInternalVersion < 6 then
 	config.PathWaypointReach = 1.5
 end
-config.InternalVersion = 7
+config.InternalVersion = 8
 
 local trackedJars = {}
 local warnedMissingCarpet = false
@@ -1047,6 +1049,7 @@ local function queueScriptForTeleport()
 _G.AutoHoneyPickupConfig = {
 	Enabled = %s,
 	ArrivalDistance = %.2f,
+	TestArrivalDistance = %.2f,
 	CarpetSpeed = %d,
 	UseGrapple = %s,
 	AntiRagdoll = %s,
@@ -1058,6 +1061,7 @@ _G.AutoHoneyPickupConfig = {
 	PathGridSize = %.2f,
 	PathGridMargin = %.2f,
 	PathMaxGridNodes = %d,
+	PathStallSeconds = %.2f,
 	ServerHopEnabled = %s,
 	ServerHopStartDelay = %d,
 	ServerHopIdleSeconds = %d,
@@ -1068,6 +1072,7 @@ loadstring(game:HttpGet(%q))()
 ]],
 		tostring(config.Enabled == true),
 		math.clamp(tonumber(config.ArrivalDistance) or 4.5, 1, 6),
+		math.clamp(tonumber(config.TestArrivalDistance) or 5, 3, 6),
 		math.floor(tonumber(config.CarpetSpeed) or 150),
 		tostring(config.UseGrapple == true),
 		tostring(config.AntiRagdoll == true),
@@ -1079,6 +1084,7 @@ loadstring(game:HttpGet(%q))()
 		math.clamp(tonumber(config.PathGridSize) or 8, 6, 14),
 		math.clamp(tonumber(config.PathGridMargin) or 80, 32, 160),
 		math.floor(math.clamp(tonumber(config.PathMaxGridNodes) or 6000, 1000, 12000)),
+		math.clamp(tonumber(config.PathStallSeconds) or 1.75, 0.75, 4),
 		tostring(config.ServerHopEnabled == true),
 		math.floor(tonumber(config.ServerHopStartDelay) or 5),
 		math.floor(tonumber(config.ServerHopIdleSeconds) or 2),
@@ -1421,8 +1427,8 @@ local function flyToJar(jar, useGrappleEngage)
 
 	local waypointIndex = 1
 	local plannedTarget = initialTarget
-	local lastWaypointDistance = math.huge
-	local stalledFrames = 0
+	local bestWaypointDistance = math.huge
+	local lastProgressAt = os.clock()
 	local nextEquipAt = 0
 	local nextSegmentCheckAt = 0
 	local flightSpeed = math.max(1, tonumber(config.CarpetSpeed) or 150)
@@ -1476,8 +1482,8 @@ local function flyToJar(jar, useGrappleEngage)
 			usedPathfinding = newUsedPathfinding
 			waypointIndex = 1
 			plannedTarget = targetPosition
-			lastWaypointDistance = math.huge
-			stalledFrames = 0
+			bestWaypointDistance = math.huge
+			lastProgressAt = os.clock()
 			replans += 1
 		end
 
@@ -1493,8 +1499,8 @@ local function flyToJar(jar, useGrappleEngage)
 			waypoint = route[waypointIndex]
 			waypointOffset = waypoint - root.Position
 			waypointDistance = waypointOffset.Magnitude
-			lastWaypointDistance = math.huge
-			stalledFrames = 0
+			bestWaypointDistance = math.huge
+			lastProgressAt = os.clock()
 		end
 
 		if os.clock() >= nextSegmentCheckAt then
@@ -1518,8 +1524,8 @@ local function flyToJar(jar, useGrappleEngage)
 				usedPathfinding = newUsedPathfinding
 				waypointIndex = 1
 				plannedTarget = targetPosition
-				lastWaypointDistance = math.huge
-				stalledFrames = 0
+				bestWaypointDistance = math.huge
+				lastProgressAt = os.clock()
 				replans += 1
 				continue
 			end
@@ -1533,14 +1539,14 @@ local function flyToJar(jar, useGrappleEngage)
 			nextEquipAt = os.clock() + 0.5
 		end
 
-		if waypointDistance >= lastWaypointDistance - 0.05 then
-			stalledFrames += 1
-		else
-			stalledFrames = 0
+		if waypointDistance < bestWaypointDistance - 0.25 then
+			bestWaypointDistance = waypointDistance
+			lastProgressAt = os.clock()
 		end
-		lastWaypointDistance = waypointDistance
 
-		if stalledFrames >= 30 then
+		if os.clock() - lastProgressAt
+			>= math.clamp(tonumber(config.PathStallSeconds) or 1.75, 0.75, 4)
+		then
 			if usedPathfinding and replans < 2 then
 				local newRoute, newUsedPathfinding = computeTravelRoute(root.Position, targetPosition, jar, "Honey")
 				if newRoute then
@@ -1548,8 +1554,8 @@ local function flyToJar(jar, useGrappleEngage)
 					usedPathfinding = newUsedPathfinding
 					waypointIndex = 1
 					plannedTarget = targetPosition
-					lastWaypointDistance = math.huge
-					stalledFrames = 0
+					bestWaypointDistance = math.huge
+					lastProgressAt = os.clock()
 					replans += 1
 					continue
 				end
@@ -1596,9 +1602,10 @@ local function flyToTestPoint(worldPosition)
 
 	local speed = math.max(1, tonumber(config.CarpetSpeed) or 150)
 	local waypointReach = math.clamp(tonumber(config.PathWaypointReach) or 1.5, 0.75, 4)
+	local testArrivalDistance = math.clamp(tonumber(config.TestArrivalDistance) or 5, 3, 6)
 	local waypointIndex = 1
-	local lastWaypointDistance = math.huge
-	local stalledFrames = 0
+	local bestWaypointDistance = math.huge
+	local lastProgressAt = os.clock()
 	local nextEquipAt = 0
 	local nextSegmentCheckAt = 0
 	local replans = 0
@@ -1615,7 +1622,7 @@ local function flyToTestPoint(worldPosition)
 		end
 
 		local destinationOffset = destination - root.Position
-		if destinationOffset.Magnitude <= 4 then
+		if destinationOffset.Magnitude <= testArrivalDistance then
 			stopMovement()
 			recoverHumanoidFor(
 				humanoid,
@@ -1634,8 +1641,8 @@ local function flyToTestPoint(worldPosition)
 			waypoint = route[waypointIndex]
 			waypointOffset = waypoint - root.Position
 			waypointDistance = waypointOffset.Magnitude
-			lastWaypointDistance = math.huge
-			stalledFrames = 0
+			bestWaypointDistance = math.huge
+			lastProgressAt = os.clock()
 		end
 
 		if os.clock() >= nextSegmentCheckAt then
@@ -1652,8 +1659,8 @@ local function flyToTestPoint(worldPosition)
 				end
 				route = newRoute
 				waypointIndex = 1
-				lastWaypointDistance = math.huge
-				stalledFrames = 0
+				bestWaypointDistance = math.huge
+				lastProgressAt = os.clock()
 				replans += 1
 				continue
 			end
@@ -1667,15 +1674,26 @@ local function flyToTestPoint(worldPosition)
 			nextEquipAt = os.clock() + 0.5
 		end
 
-		if waypointDistance >= lastWaypointDistance - 0.05 then
-			stalledFrames += 1
-		else
-			stalledFrames = 0
+		if waypointDistance < bestWaypointDistance - 0.25 then
+			bestWaypointDistance = waypointDistance
+			lastProgressAt = os.clock()
 		end
-		lastWaypointDistance = waypointDistance
-		if stalledFrames >= 30 then
+		if os.clock() - lastProgressAt
+			>= math.clamp(tonumber(config.PathStallSeconds) or 1.75, 0.75, 4)
+		then
+			if replans < 2 then
+				local newRoute = computeTravelRoute(root.Position, destination, nil, "Test")
+				if newRoute then
+					route = newRoute
+					waypointIndex = 1
+					bestWaypointDistance = math.huge
+					lastProgressAt = os.clock()
+					replans += 1
+					continue
+				end
+			end
 			stopMovement()
-			return false, "Test route stalled"
+			return false, "Test route stalled after replanning"
 		end
 
 		local segmentSpeed = math.min(speed, math.max(30, waypointDistance * 6))
