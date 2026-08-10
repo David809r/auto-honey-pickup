@@ -28,6 +28,10 @@ if type(_G.AutoHoneyPickupSession) == "table" then
 		end)
 	end
 
+	for _, cleanup in ipairs(_G.AutoHoneyPickupSession.cleanup or {}) do
+		pcall(cleanup)
+	end
+
 	if _G.AutoHoneyPickupSession.gui then
 		pcall(function()
 			_G.AutoHoneyPickupSession.gui:Destroy()
@@ -44,6 +48,7 @@ end
 local session = {
 	cancelled = false,
 	connections = {},
+	cleanup = {},
 	testActive = false,
 	serverHopActive = false,
 }
@@ -68,6 +73,9 @@ if config.FlightTimeout == nil then config.FlightTimeout = 10 end
 if config.CarpetSpeed == nil then config.CarpetSpeed = 150 end
 if config.PreferredCarpet == nil then config.PreferredCarpet = "Flying Carpet" end
 if config.UseGrapple == nil then config.UseGrapple = true end
+if config.AntiRagdoll == nil then config.AntiRagdoll = true end
+if config.AntiRagdollRecoverySeconds == nil then config.AntiRagdollRecoverySeconds = 0.6 end
+if config.AntiFlingSpeedLimit == nil then config.AntiFlingSpeedLimit = 220 end
 if config.UsePathfinding == nil then config.UsePathfinding = true end
 if config.PathAgentRadius == nil then config.PathAgentRadius = 4 end
 if config.PathWaypointReach == nil then config.PathWaypointReach = 1.5 end
@@ -82,8 +90,8 @@ if config.ServerHopMaxPages == nil then config.ServerHopMaxPages = 1 end
 if config.RequeueOnTeleport == nil then config.RequeueOnTeleport = true end
 if config.BeeEventCheckInterval == nil then config.BeeEventCheckInterval = 0.5 end
 
--- Version 6 keeps the event/hopper cadence and migrates existing sessions to
--- tighter waypoint arrival so carpet movement cannot cut across wall corners.
+-- Version 7 keeps the route/hopper cadence and adds movement-scoped ragdoll
+-- recovery without disabling ordinary jump/freefall states.
 if previousInternalVersion < 4 then
 	config.ServerHopStartDelay = 5
 	config.ServerHopIdleSeconds = 2
@@ -93,7 +101,7 @@ end
 if previousInternalVersion < 6 then
 	config.PathWaypointReach = 1.5
 end
-config.InternalVersion = 6
+config.InternalVersion = 7
 
 local trackedJars = {}
 local warnedMissingCarpet = false
@@ -766,6 +774,135 @@ local function getCharacter()
 	return nil, nil, nil
 end
 
+local ANTI_RAGDOLL_STATES = {
+	Enum.HumanoidStateType.Ragdoll,
+	Enum.HumanoidStateType.FallingDown,
+	Enum.HumanoidStateType.PlatformStanding,
+}
+local BAD_RECOVERY_STATES = {
+	[Enum.HumanoidStateType.Ragdoll] = true,
+	[Enum.HumanoidStateType.FallingDown] = true,
+	[Enum.HumanoidStateType.PlatformStanding] = true,
+	[Enum.HumanoidStateType.Physics] = true,
+}
+local configuredAntiRagdollHumanoids = setmetatable({}, { __mode = "k" })
+
+local function stabilizeHumanoid(humanoid, root, movementActive)
+	if not config.AntiRagdoll or not humanoid or not root
+		or not humanoid.Parent or not root.Parent
+	then
+		return
+	end
+
+	local state = humanoid:GetState()
+	local severelyTilted = root.CFrame.UpVector.Y < 0.45
+	local needsRecovery = BAD_RECOVERY_STATES[state] == true
+		or humanoid.PlatformStand
+		or severelyTilted
+	if movementActive then
+		humanoid.Sit = false
+		humanoid.PlatformStand = false
+		humanoid.AutoRotate = true
+	end
+
+	root.AssemblyAngularVelocity = Vector3.zero
+	if needsRecovery then
+		root.AssemblyLinearVelocity = Vector3.zero
+		humanoid.PlatformStand = false
+		humanoid.Sit = false
+		humanoid.AutoRotate = true
+		if severelyTilted then
+			local flatLook = Vector3.new(root.CFrame.LookVector.X, 0, root.CFrame.LookVector.Z)
+			if flatLook.Magnitude < 0.1 then
+				flatLook = Vector3.new(0, 0, -1)
+			end
+			root.CFrame = CFrame.lookAt(root.Position, root.Position + flatLook.Unit, Vector3.yAxis)
+		end
+		pcall(function()
+			humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+		end)
+	elseif root.AssemblyLinearVelocity.Magnitude
+		> math.max(50, tonumber(config.AntiFlingSpeedLimit) or 220)
+	then
+		-- Clamp unexpected launch impulses. Normal route velocity is reapplied by
+		-- the movement loop on the next frame.
+		root.AssemblyLinearVelocity = root.AssemblyLinearVelocity.Unit
+			* math.max(50, tonumber(config.AntiFlingSpeedLimit) or 220)
+	end
+end
+
+local function configureHumanoidAntiRagdoll(humanoid)
+	if not config.AntiRagdoll or not humanoid or configuredAntiRagdollHumanoids[humanoid] then
+		return
+	end
+	configuredAntiRagdollHumanoids[humanoid] = true
+
+	local originalStates = {}
+	for _, state in ipairs(ANTI_RAGDOLL_STATES) do
+		local ok, enabled = pcall(function()
+			return humanoid:GetStateEnabled(state)
+		end)
+		if ok then
+			originalStates[state] = enabled
+		else
+			originalStates[state] = true
+		end
+		pcall(function()
+			humanoid:SetStateEnabled(state, false)
+		end)
+	end
+
+	local stateConnection = humanoid.StateChanged:Connect(function(_, newState)
+		if BAD_RECOVERY_STATES[newState] then
+			local root = humanoid.Parent and humanoid.Parent:FindFirstChild("HumanoidRootPart")
+			stabilizeHumanoid(humanoid, root, false)
+		end
+	end)
+	table.insert(session.connections, stateConnection)
+	table.insert(session.cleanup, function()
+		if humanoid.Parent then
+			for state, enabled in pairs(originalStates) do
+				pcall(function()
+					humanoid:SetStateEnabled(state, enabled)
+				end)
+			end
+		end
+	end)
+end
+
+local function recoverHumanoidFor(humanoid, root, duration, holdPosition)
+	if not config.AntiRagdoll then
+		return
+	end
+	local deadline = os.clock() + math.max(0, duration or 0)
+	repeat
+		stabilizeHumanoid(humanoid, root, true)
+		if holdPosition and root and root.Parent then
+			root.AssemblyLinearVelocity = Vector3.zero
+		end
+		RunService.Heartbeat:Wait()
+	until os.clock() >= deadline or session.cancelled
+end
+
+do
+	local _, humanoid, root = getCharacter()
+	if humanoid then
+		configureHumanoidAntiRagdoll(humanoid)
+		stabilizeHumanoid(humanoid, root, false)
+	end
+
+	table.insert(session.connections, LocalPlayer.CharacterAdded:Connect(function(character)
+		task.spawn(function()
+			local newHumanoid = character:WaitForChild("Humanoid", 5)
+			local newRoot = character:WaitForChild("HumanoidRootPart", 5)
+			if newHumanoid and newRoot and not session.cancelled then
+				configureHumanoidAntiRagdoll(newHumanoid)
+				stabilizeHumanoid(newHumanoid, newRoot, false)
+			end
+		end)
+	end))
+end
+
 local function findTool(name)
 	local character = LocalPlayer.Character
 	local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
@@ -851,7 +988,7 @@ local function engageCarpet()
 			end
 
 			if fired then
-				task.wait(0.22)
+				recoverHumanoidFor(humanoid, character:FindFirstChild("HumanoidRootPart"), 0.22, false)
 			end
 		elseif not warnedMissingGrapple then
 			warnedMissingGrapple = true
@@ -877,10 +1014,11 @@ local function engageCarpet()
 end
 
 local function stopMovement()
-	local _, _, root = getCharacter()
+	local _, humanoid, root = getCharacter()
 	if root then
 		root.AssemblyLinearVelocity = Vector3.zero
 		root.AssemblyAngularVelocity = Vector3.zero
+		stabilizeHumanoid(humanoid, root, true)
 	end
 end
 
@@ -911,6 +1049,9 @@ _G.AutoHoneyPickupConfig = {
 	ArrivalDistance = %.2f,
 	CarpetSpeed = %d,
 	UseGrapple = %s,
+	AntiRagdoll = %s,
+	AntiRagdollRecoverySeconds = %.2f,
+	AntiFlingSpeedLimit = %.2f,
 	UsePathfinding = %s,
 	PathAgentRadius = %.2f,
 	PathWaypointReach = %.2f,
@@ -929,6 +1070,9 @@ loadstring(game:HttpGet(%q))()
 		math.clamp(tonumber(config.ArrivalDistance) or 4.5, 1, 6),
 		math.floor(tonumber(config.CarpetSpeed) or 150),
 		tostring(config.UseGrapple == true),
+		tostring(config.AntiRagdoll == true),
+		math.clamp(tonumber(config.AntiRagdollRecoverySeconds) or 0.6, 0.1, 2),
+		math.max(50, tonumber(config.AntiFlingSpeedLimit) or 220),
 		tostring(config.UsePathfinding == true),
 		math.clamp(tonumber(config.PathAgentRadius) or 4, 2, 8),
 		math.clamp(tonumber(config.PathWaypointReach) or 1.5, 0.75, 4),
@@ -1250,6 +1394,8 @@ local function flyToJar(jar, useGrappleEngage)
 	if not humanoid or not root then
 		return "character_changed"
 	end
+	configureHumanoidAntiRagdoll(humanoid)
+	stabilizeHumanoid(humanoid, root, true)
 
 	local carpet = useGrappleEngage and engageCarpet() or equipCarpet()
 	if not carpet then
@@ -1309,7 +1455,12 @@ local function flyToJar(jar, useGrappleEngage)
 
 		if distance <= getArrivalDistance(jar) then
 			stopMovement()
-			task.wait(0.4)
+			recoverHumanoidFor(
+				humanoid,
+				root,
+				math.clamp(tonumber(config.AntiRagdollRecoverySeconds) or 0.6, 0.1, 2),
+				true
+			)
 			return getJarPosition(jar) and "arrived" or "collected"
 		end
 
@@ -1410,6 +1561,7 @@ local function flyToJar(jar, useGrappleEngage)
 		local segmentSpeed = math.min(flightSpeed, math.max(30, waypointDistance * 6))
 		root.AssemblyLinearVelocity = waypointOffset.Unit * segmentSpeed
 		root.AssemblyAngularVelocity = Vector3.zero
+		stabilizeHumanoid(humanoid, root, true)
 		RunService.Heartbeat:Wait()
 	end
 
@@ -1422,6 +1574,8 @@ local function flyToTestPoint(worldPosition)
 	if not humanoid or not root then
 		return false, "Character unavailable"
 	end
+	configureHumanoidAntiRagdoll(humanoid)
+	stabilizeHumanoid(humanoid, root, true)
 
 	if not engageCarpet() then
 		return false, "Carpet not found"
@@ -1463,6 +1617,12 @@ local function flyToTestPoint(worldPosition)
 		local destinationOffset = destination - root.Position
 		if destinationOffset.Magnitude <= 4 then
 			stopMovement()
+			recoverHumanoidFor(
+				humanoid,
+				root,
+				math.clamp(tonumber(config.AntiRagdollRecoverySeconds) or 0.6, 0.1, 2),
+				true
+			)
 			return true, "Test destination reached"
 		end
 
@@ -1521,6 +1681,7 @@ local function flyToTestPoint(worldPosition)
 		local segmentSpeed = math.min(speed, math.max(30, waypointDistance * 6))
 		root.AssemblyLinearVelocity = waypointOffset.Unit * segmentSpeed
 		root.AssemblyAngularVelocity = Vector3.zero
+		stabilizeHumanoid(humanoid, root, true)
 		RunService.Heartbeat:Wait()
 	end
 
@@ -2140,4 +2301,7 @@ for _, connection in ipairs(session.connections) do
 	pcall(function()
 		connection:Disconnect()
 	end)
+end
+for _, cleanup in ipairs(session.cleanup) do
+	pcall(cleanup)
 end
