@@ -61,6 +61,34 @@ if type(config) ~= "table" then
 	_G.AutoHoneyPickupConfig = config
 end
 
+local PERSISTENT_CONFIG_FILE = "david809_autohoney.json"
+local executorEnvironment = _G
+if type(getgenv) == "function" then
+	pcall(function()
+		executorEnvironment = getgenv()
+	end)
+end
+local executorReadFile = executorEnvironment and executorEnvironment.readfile or readfile
+local executorWriteFile = executorEnvironment and executorEnvironment.writefile or writefile
+local persistentConfigData = {}
+
+if type(executorReadFile) == "function" then
+	local readOk, rawConfig = pcall(executorReadFile, PERSISTENT_CONFIG_FILE)
+	if readOk and type(rawConfig) == "string" then
+		local decodeOk, decoded = pcall(function()
+			return HttpService:JSONDecode(rawConfig)
+		end)
+		if decodeOk and type(decoded) == "table" then
+			persistentConfigData = decoded
+			if config.CarpetSpeed == nil and tonumber(decoded.CarpetSpeed) then
+				config.CarpetSpeed = math.floor(
+					math.clamp(tonumber(decoded.CarpetSpeed), 25, 500) + 0.5
+				)
+			end
+		end
+	end
+end
+
 -- These can be changed before executing the script, for example:
 -- _G.AutoHoneyPickupConfig = { Enabled = true, Debug = true }
 local previousInternalVersion = tonumber(config.InternalVersion) or 0
@@ -92,6 +120,28 @@ if config.ServerHopRetrySeconds == nil then config.ServerHopRetrySeconds = 3 end
 if config.ServerHopMaxPages == nil then config.ServerHopMaxPages = 1 end
 if config.RequeueOnTeleport == nil then config.RequeueOnTeleport = true end
 if config.BeeEventCheckInterval == nil then config.BeeEventCheckInterval = 0.5 end
+
+local function savePersistentSpeed()
+	if type(executorWriteFile) ~= "function" then
+		return false, "file API unavailable"
+	end
+
+	persistentConfigData.CarpetSpeed = math.floor(
+		math.clamp(tonumber(config.CarpetSpeed) or 150, 25, 500) + 0.5
+	)
+	local encodeOk, encoded = pcall(function()
+		return HttpService:JSONEncode(persistentConfigData)
+	end)
+	if not encodeOk then
+		return false, "JSON encode failed"
+	end
+
+	local writeOk, writeError = pcall(executorWriteFile, PERSISTENT_CONFIG_FILE, encoded)
+	return writeOk, writeOk and nil or tostring(writeError)
+end
+
+-- Create/repair the executor workspace file immediately when file APIs exist.
+savePersistentSpeed()
 
 -- Version 8 uses elapsed progress time instead of frame counts for stall
 -- detection, avoiding false stalls at different client frame rates.
@@ -2119,7 +2169,13 @@ local function createControlPanel()
 		local speed = math.clamp(tonumber(speedBox.Text) or config.CarpetSpeed, 25, 500)
 		config.CarpetSpeed = math.floor(speed + 0.5)
 		speedBox.Text = tostring(config.CarpetSpeed)
-		updateUIStatus("Speed set to " .. speedBox.Text, Color3.fromRGB(147, 197, 253))
+		local saved = savePersistentSpeed()
+		updateUIStatus(
+			saved
+				and ("Speed " .. speedBox.Text .. " saved to " .. PERSISTENT_CONFIG_FILE)
+				or ("Speed set to " .. speedBox.Text .. " - file API unavailable"),
+			saved and Color3.fromRGB(74, 222, 128) or Color3.fromRGB(251, 191, 36)
+		)
 	end))
 
 	table.insert(session.connections, selectButton.Activated:Connect(function()

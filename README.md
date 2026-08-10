@@ -65,4 +65,6 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/David809r/auto-honey-
 
 Honey movement stops at the configured arrival distance, capped at 6 studs and at half of the pickup prompt's range. With the default settings, the character stops about 4.5 studs from the Honey instead of near the 12-stud claim boundary.
 
+The speed box persists `CarpetSpeed` in `david809_autohoney.json` inside the executor's workspace. The file is loaded on future executions when no explicit `_G.AutoHoneyPickupConfig.CarpetSpeed` was supplied. Executors without `readfile`/`writefile` continue normally but cannot persist the value.
+
 The fast hopper waits 5 seconds on a fresh loaded server so the Bee controller can restore its state. Its countdown only runs while the UI reports `BEE EVENT: ACTIVE`; an inactive or unconfirmed event keeps the hopper waiting in the current server. After Honey is detected, it waits for 2 seconds with no available pickup before choosing another server. Failed hops retry after 3 seconds. If Roblox blocks the public server-list response, the script falls back to normal public matchmaking instead of getting stuck. Teleports must be tested in the Roblox application; Roblox Studio playtesting does not support `TeleportService`.
