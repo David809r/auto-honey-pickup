@@ -74,6 +74,7 @@ if config.FlightTimeout == nil then config.FlightTimeout = 10 end
 if config.CarpetSpeed == nil then config.CarpetSpeed = 150 end
 if config.PreferredCarpet == nil then config.PreferredCarpet = "Flying Carpet" end
 if config.UseGrapple == nil then config.UseGrapple = true end
+if config.AimGrappleAtRoute == nil then config.AimGrappleAtRoute = true end
 if config.AntiRagdoll == nil then config.AntiRagdoll = true end
 if config.AntiRagdollRecoverySeconds == nil then config.AntiRagdollRecoverySeconds = 0.6 end
 if config.AntiFlingSpeedLimit == nil then config.AntiFlingSpeedLimit = 220 end
@@ -954,9 +955,9 @@ local function equipCarpet()
 	return nil
 end
 
-local function engageCarpet()
-	local character, humanoid = getCharacter()
-	if not character or not humanoid then
+local function engageCarpet(grappleTarget)
+	local character, humanoid, root = getCharacter()
+	if not character or not humanoid or not root then
 		return nil
 	end
 
@@ -975,6 +976,30 @@ local function engageCarpet()
 				end
 			end
 
+			local camera = Workspace.CurrentCamera
+			local savedCameraCFrame = camera and camera.CFrame
+			if config.AimGrappleAtRoute and grappleTarget then
+				local flatDirection = Vector3.new(
+					grappleTarget.X - root.Position.X,
+					0,
+					grappleTarget.Z - root.Position.Z
+				)
+				if flatDirection.Magnitude > 0.1 then
+					root.CFrame = CFrame.lookAt(
+						root.Position,
+						root.Position + flatDirection.Unit,
+						Vector3.yAxis
+					)
+				end
+				if camera then
+					camera.CFrame = CFrame.lookAt(
+						camera.CFrame.Position,
+						grappleTarget,
+						Vector3.yAxis
+					)
+				end
+			end
+
 			local fired = false
 			if grapple.Parent == character and type(_G.SXEFireGrapple2) == "function" then
 				local ok, result = pcall(_G.SXEFireGrapple2)
@@ -987,6 +1012,10 @@ local function engageCarpet()
 				fired = pcall(function()
 					grapple:Activate()
 				end)
+			end
+
+			if camera and savedCameraCFrame then
+				camera.CFrame = savedCameraCFrame
 			end
 
 			if fired then
@@ -1052,6 +1081,7 @@ _G.AutoHoneyPickupConfig = {
 	TestArrivalDistance = %.2f,
 	CarpetSpeed = %d,
 	UseGrapple = %s,
+	AimGrappleAtRoute = %s,
 	AntiRagdoll = %s,
 	AntiRagdollRecoverySeconds = %.2f,
 	AntiFlingSpeedLimit = %.2f,
@@ -1075,6 +1105,7 @@ loadstring(game:HttpGet(%q))()
 		math.clamp(tonumber(config.TestArrivalDistance) or 5, 3, 6),
 		math.floor(tonumber(config.CarpetSpeed) or 150),
 		tostring(config.UseGrapple == true),
+		tostring(config.AimGrappleAtRoute == true),
 		tostring(config.AntiRagdoll == true),
 		math.clamp(tonumber(config.AntiRagdollRecoverySeconds) or 0.6, 0.1, 2),
 		math.max(50, tonumber(config.AntiFlingSpeedLimit) or 220),
@@ -1403,16 +1434,6 @@ local function flyToJar(jar, useGrappleEngage)
 	configureHumanoidAntiRagdoll(humanoid)
 	stabilizeHumanoid(humanoid, root, true)
 
-	local carpet = useGrappleEngage and engageCarpet() or equipCarpet()
-	if not carpet then
-		return "no_carpet"
-	end
-
-	pcall(function()
-		root.Anchored = false
-	end)
-
-	local startedAt = os.clock()
 	local initialTarget = getJarPosition(jar)
 	if not initialTarget then
 		return "collected"
@@ -1424,6 +1445,17 @@ local function flyToJar(jar, useGrappleEngage)
 		updateUIStatus("No safe path to Honey - trying another", Color3.fromRGB(248, 113, 113))
 		return "no_path"
 	end
+
+	local carpet = useGrappleEngage and engageCarpet(route[1]) or equipCarpet()
+	if not carpet then
+		return "no_carpet"
+	end
+
+	pcall(function()
+		root.Anchored = false
+	end)
+
+	local startedAt = os.clock()
 
 	local waypointIndex = 1
 	local plannedTarget = initialTarget
@@ -1583,14 +1615,6 @@ local function flyToTestPoint(worldPosition)
 	configureHumanoidAntiRagdoll(humanoid)
 	stabilizeHumanoid(humanoid, root, true)
 
-	if not engageCarpet() then
-		return false, "Carpet not found"
-	end
-
-	pcall(function()
-		root.Anchored = false
-	end)
-
 	-- Mouse.Hit is on the clicked surface; lift the destination so the root does
 	-- not aim below the floor.
 	local destination = worldPosition + Vector3.new(0, 3, 0)
@@ -1599,6 +1623,14 @@ local function flyToTestPoint(worldPosition)
 		stopMovement()
 		return false, "No safe path to test destination"
 	end
+
+	if not engageCarpet(route[1]) then
+		return false, "Carpet not found"
+	end
+
+	pcall(function()
+		root.Anchored = false
+	end)
 
 	local speed = math.max(1, tonumber(config.CarpetSpeed) or 150)
 	local waypointReach = math.clamp(tonumber(config.PathWaypointReach) or 1.5, 0.75, 4)
@@ -1714,7 +1746,7 @@ local function collectJar(jar)
 	local grappleEngaged = false
 
 	log("Flying to", jar:GetFullName())
-	updateUIStatus("Honey found - starting grapple TP", Color3.fromRGB(147, 197, 253))
+	updateUIStatus("Honey found - planning route", Color3.fromRGB(147, 197, 253))
 
 	while not session.cancelled
 		and config.Enabled
@@ -2147,7 +2179,7 @@ local function createControlPanel()
 		task.spawn(function()
 			stopMovement()
 			task.wait(0.15)
-			updateUIStatus("Grappling, then flying to test point", Color3.fromRGB(147, 197, 253))
+			updateUIStatus("Planning route, then aimed grapple", Color3.fromRGB(147, 197, 253))
 			local callSucceeded, success, message = pcall(flyToTestPoint, selectedPoint)
 			if not callSucceeded then
 				local errorMessage = success

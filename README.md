@@ -14,6 +14,7 @@ Your client must support `loadstring` and `game:HttpGet`.
 - Detects the Bee event's live `Honey` models by their hidden claim prompt.
 - Detects whether the Bee event is active from the controller's hive state, with live event models and the bottom-right Bee icon as fallbacks. The UI header shows `ACTIVE`, `INACTIVE`, or `CHECKING`.
 - Fires the Grapple Hook, equips a supported carpet, and glides at a default speed of 150.
+- Aims each grapple at the first safe route waypoint, so the player camera angle cannot redirect its launch.
 - Prevents teleport ragdolls, cancels rotational fling, clamps abnormal launch speed, and forces the humanoid back up after arrival.
 - Precomputes a multi-wall grid route, checks every player-width segment, and follows it around structures instead of pushing through them. Unsafe routes are rejected.
 - Automatically stops within the game's 12-stud claim range.
@@ -41,6 +42,7 @@ _G.AutoHoneyPickupConfig = {
     TestArrivalDistance = 5,
     CarpetSpeed = 150,
     UseGrapple = true,
+    AimGrappleAtRoute = true,
     AntiRagdoll = true,
     AntiRagdollRecoverySeconds = 0.6,
     AntiFlingSpeedLimit = 220,
