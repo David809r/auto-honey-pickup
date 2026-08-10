@@ -27,7 +27,7 @@ Your client must support `loadstring` and `game:HttpGet`.
 2. Click a visible surface in the world.
 3. Click **RUN GRAPPLE TP**.
 
-The test temporarily takes movement control, runs the grapple/carpet sequence, and then returns control to automation.
+The test temporarily takes movement control, runs the grapple/carpet sequence, and then returns control to automation. It uses the same wall detection and precomputed waypoint routing as automatic Honey pickup, so selecting a point behind a structure tests the real obstacle-avoidance behavior.
 
 ## Configuration
 

@@ -422,12 +422,16 @@ local function getGroundRoutePosition(position, jar)
 	return position
 end
 
-local function computeHoneyRoute(fromPosition, targetPosition, jar)
+local function computeTravelRoute(fromPosition, targetPosition, jar, routeLabel)
+	routeLabel = routeLabel or "Honey"
 	if not config.UsePathfinding or isFlightSegmentClear(fromPosition, targetPosition, jar) then
 		return { targetPosition }, false
 	end
 
-	updateUIStatus("Wall detected - planning Honey route", Color3.fromRGB(251, 191, 36))
+	updateUIStatus(
+		string.format("Wall detected - planning %s route", routeLabel),
+		Color3.fromRGB(251, 191, 36)
+	)
 	local startPosition = getGroundRoutePosition(fromPosition, jar)
 	local endPosition = getGroundRoutePosition(targetPosition, jar)
 	local path = PathfindingService:CreatePath({
@@ -466,9 +470,9 @@ local function computeHoneyRoute(fromPosition, targetPosition, jar)
 		route[#route] = targetPosition
 	end
 
-	log("Planned Honey route with", #route, "waypoints")
+	log("Planned", routeLabel, "route with", #route, "waypoints")
 	updateUIStatus(
-		string.format("Honey route ready - %d waypoints", #route),
+		string.format("%s route ready - %d waypoints", routeLabel, #route),
 		Color3.fromRGB(147, 197, 253)
 	)
 	return route, true
@@ -1002,7 +1006,7 @@ local function flyToJar(jar, useGrappleEngage)
 		return "collected"
 	end
 
-	local route, usedPathfinding = computeHoneyRoute(root.Position, initialTarget, jar)
+	local route, usedPathfinding = computeTravelRoute(root.Position, initialTarget, jar, "Honey")
 	if not route then
 		stopMovement()
 		updateUIStatus("No safe path to Honey - trying another", Color3.fromRGB(248, 113, 113))
@@ -1051,7 +1055,7 @@ local function flyToJar(jar, useGrappleEngage)
 		-- Honey can still be falling when first replicated. Recompute the complete
 		-- route if its destination moved materially after the original plan.
 		if (targetPosition - plannedTarget).Magnitude > 8 and replans < 2 then
-			local newRoute, newUsedPathfinding = computeHoneyRoute(root.Position, targetPosition, jar)
+			local newRoute, newUsedPathfinding = computeTravelRoute(root.Position, targetPosition, jar, "Honey")
 			if not newRoute then
 				stopMovement()
 				return "no_path"
@@ -1098,7 +1102,7 @@ local function flyToJar(jar, useGrappleEngage)
 
 		if stalledFrames >= 30 then
 			if usedPathfinding and replans < 2 then
-				local newRoute, newUsedPathfinding = computeHoneyRoute(root.Position, targetPosition, jar)
+				local newRoute, newUsedPathfinding = computeTravelRoute(root.Position, targetPosition, jar, "Honey")
 				if newRoute then
 					route = newRoute
 					usedPathfinding = newUsedPathfinding
@@ -1141,7 +1145,18 @@ local function flyToTestPoint(worldPosition)
 	-- Mouse.Hit is on the clicked surface; lift the destination so the root does
 	-- not aim below the floor.
 	local destination = worldPosition + Vector3.new(0, 3, 0)
+	local route = computeTravelRoute(root.Position, destination, nil, "Test")
+	if not route then
+		stopMovement()
+		return false, "No safe path to test destination"
+	end
+
 	local speed = math.max(1, tonumber(config.CarpetSpeed) or 150)
+	local waypointReach = math.clamp(tonumber(config.PathWaypointReach) or 3.5, 2, 6)
+	local waypointIndex = 1
+	local lastWaypointDistance = math.huge
+	local stalledFrames = 0
+	local nextEquipAt = 0
 	local deadline = os.clock() + config.FlightTimeout
 
 	while os.clock() < deadline do
@@ -1154,18 +1169,45 @@ local function flyToTestPoint(worldPosition)
 			return false, "Character changed"
 		end
 
-		local offset = destination - root.Position
-		if offset.Magnitude <= 4 then
+		local destinationOffset = destination - root.Position
+		if destinationOffset.Magnitude <= 4 then
 			stopMovement()
 			return true, "Test destination reached"
 		end
 
-		if not equipCarpet() then
-			stopMovement()
-			return false, "Carpet unequipped"
+		local waypoint = route[waypointIndex]
+		local waypointOffset = waypoint - root.Position
+		local waypointDistance = waypointOffset.Magnitude
+		while waypointIndex < #route and waypointDistance <= waypointReach do
+			waypointIndex += 1
+			waypoint = route[waypointIndex]
+			waypointOffset = waypoint - root.Position
+			waypointDistance = waypointOffset.Magnitude
+			lastWaypointDistance = math.huge
+			stalledFrames = 0
 		end
 
-		root.AssemblyLinearVelocity = offset.Unit * speed
+		if os.clock() >= nextEquipAt then
+			if not equipCarpet() then
+				stopMovement()
+				return false, "Carpet unequipped"
+			end
+			nextEquipAt = os.clock() + 0.5
+		end
+
+		if waypointDistance >= lastWaypointDistance - 0.05 then
+			stalledFrames += 1
+		else
+			stalledFrames = 0
+		end
+		lastWaypointDistance = waypointDistance
+		if stalledFrames >= 30 then
+			stopMovement()
+			return false, "Test route stalled"
+		end
+
+		local segmentSpeed = math.min(speed, math.max(30, waypointDistance * 6))
+		root.AssemblyLinearVelocity = waypointOffset.Unit * segmentSpeed
 		root.AssemblyAngularVelocity = Vector3.zero
 		RunService.Heartbeat:Wait()
 	end
