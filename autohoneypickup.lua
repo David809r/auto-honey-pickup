@@ -68,21 +68,21 @@ if config.CarpetSpeed == nil then config.CarpetSpeed = 150 end
 if config.PreferredCarpet == nil then config.PreferredCarpet = "Flying Carpet" end
 if config.UseGrapple == nil then config.UseGrapple = true end
 if config.ServerHopEnabled == nil then config.ServerHopEnabled = true end
-if config.ServerHopStartDelay == nil then config.ServerHopStartDelay = 3 end
+if config.ServerHopStartDelay == nil then config.ServerHopStartDelay = 5 end
 if config.ServerHopIdleSeconds == nil then config.ServerHopIdleSeconds = 2 end
 if config.ServerHopRetrySeconds == nil then config.ServerHopRetrySeconds = 3 end
 if config.ServerHopMaxPages == nil then config.ServerHopMaxPages = 1 end
 if config.RequeueOnTeleport == nil then config.RequeueOnTeleport = true end
 
--- Version 3 switches existing sessions from the original conservative hopper
--- timings to the fast Bee-event cadence requested for the 10-minute window.
-if previousInternalVersion < 3 then
-	config.ServerHopStartDelay = 3
+-- Version 4 keeps the fast event cadence but gives the Bee controller five
+-- seconds to restore its state before an empty-server hop can begin.
+if previousInternalVersion < 4 then
+	config.ServerHopStartDelay = 5
 	config.ServerHopIdleSeconds = 2
 	config.ServerHopRetrySeconds = 3
 	config.ServerHopMaxPages = 1
 end
-config.InternalVersion = 3
+config.InternalVersion = 4
 
 local trackedJars = {}
 local warnedMissingCarpet = false
@@ -425,7 +425,7 @@ loadstring(game:HttpGet(%q))()
 		math.floor(tonumber(config.CarpetSpeed) or 150),
 		tostring(config.UseGrapple == true),
 		tostring(config.ServerHopEnabled == true),
-		math.floor(tonumber(config.ServerHopStartDelay) or 3),
+		math.floor(tonumber(config.ServerHopStartDelay) or 5),
 		math.floor(tonumber(config.ServerHopIdleSeconds) or 2),
 		LOADSTRING_URL
 	)
@@ -449,6 +449,139 @@ local function getVisitedServerList(extraServerId)
 	return result
 end
 
+local function getExecutorRequestFunction()
+	local environment = _G
+	if type(getgenv) == "function" then
+		pcall(function()
+			environment = getgenv()
+		end)
+	end
+
+	return (environment and (environment.request or environment.http_request))
+		or request
+		or http_request
+		or (syn and syn.request)
+		or (http and http.request)
+		or (fluxus and fluxus.request)
+end
+
+local function requestServerListBody(url)
+	local lastBody
+	local lastError
+	local requestFunction = getExecutorRequestFunction()
+
+	if type(requestFunction) == "function" then
+		local ok, response = pcall(requestFunction, {
+			Url = url,
+			Method = "GET",
+			Headers = {
+				Accept = "application/json",
+				["Cache-Control"] = "no-cache",
+			},
+		})
+
+		if ok and type(response) == "table" then
+			local status = tonumber(response.StatusCode or response.Status)
+			local body = response.Body or response.body
+			if type(body) == "string" then
+				lastBody = body
+			end
+			if status and status >= 200 and status < 300 and lastBody then
+				return lastBody
+			end
+			lastError = status and ("HTTP " .. tostring(status)) or "Executor request failed"
+		elseif ok and type(response) == "string" then
+			return response
+		else
+			lastError = tostring(response)
+		end
+	end
+
+	-- The second argument requests a fresh response on executors that implement
+	-- the no-cache form of DataModel:HttpGet.
+	local httpGetOk, httpGetBody = pcall(function()
+		return game:HttpGet(url, true)
+	end)
+	if httpGetOk and type(httpGetBody) == "string" and httpGetBody ~= "" then
+		return httpGetBody
+	end
+
+	return lastBody, lastError or tostring(httpGetBody)
+end
+
+local function decodeServerList(body)
+	if type(body) ~= "string" or body == "" then
+		return nil, "Empty public server response"
+	end
+
+	local decodeOk, response = pcall(HttpService.JSONDecode, HttpService, body)
+	if not decodeOk or type(response) ~= "table" then
+		return nil, "Public server response was not JSON"
+	end
+
+	if type(response.data) ~= "table" then
+		local apiMessage
+		if type(response.errors) == "table" and type(response.errors[1]) == "table" then
+			apiMessage = response.errors[1].message
+		end
+		return nil, apiMessage or "Public server response had no data list"
+	end
+
+	return response
+end
+
+local function fetchServerPage(cursor)
+	local cursorSuffix = ""
+	if cursor and cursor ~= "" then
+		cursorSuffix = "&cursor=" .. HttpService:UrlEncode(cursor)
+	end
+
+	-- Limit 50 avoids Roblox's known empty/invalid limit=100 responses. The
+	-- numeric server-type route is retained as a fallback for API rollouts that
+	-- reject the named Public route.
+	local urls = {
+		string.format(
+			"https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&excludeFullGames=true&limit=50%s",
+			game.PlaceId,
+			cursorSuffix
+		),
+		string.format(
+			"https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&limit=50%s",
+			game.PlaceId,
+			cursorSuffix
+		),
+		string.format(
+			"https://games.roblox.com/v1/games/%d/servers/0?sortOrder=2&excludeFullGames=true&limit=50%s",
+			game.PlaceId,
+			cursorSuffix
+		),
+	}
+
+	local lastError = "Public server request failed"
+	local emptyResponse
+
+	for attempt = 1, 2 do
+		for _, url in ipairs(urls) do
+			local body, requestError = requestServerListBody(url)
+			local response, decodeError = decodeServerList(body)
+			if response then
+				if #response.data > 0 then
+					return response
+				end
+				emptyResponse = response
+			else
+				lastError = requestError or decodeError or lastError
+			end
+		end
+
+		if attempt < 2 then
+			task.wait(0.5)
+		end
+	end
+
+	return emptyResponse, emptyResponse and nil or lastError
+end
+
 local function findLowestPopulationServer()
 	local bestUnvisited
 	local bestAny
@@ -462,26 +595,9 @@ local function findLowestPopulationServer()
 	end
 
 	for _ = 1, maxPages do
-		local url = string.format(
-			"https://games.roblox.com/v1/games/%d/servers/Public?sortOrder=Asc&excludeFullGames=true&limit=100",
-			game.PlaceId
-		)
-
-		if cursor and cursor ~= "" then
-			url ..= "&cursor=" .. HttpService:UrlEncode(cursor)
-		end
-
-		local requestOk, body = pcall(function()
-			return game:HttpGet(url)
-		end)
-
-		if not requestOk or type(body) ~= "string" then
-			return nil, "Public server request failed"
-		end
-
-		local decodeOk, response = pcall(HttpService.JSONDecode, HttpService, body)
-		if not decodeOk or type(response) ~= "table" or type(response.data) ~= "table" then
-			return nil, "Invalid public server response"
+		local response, responseError = fetchServerPage(cursor)
+		if not response then
+			return nil, responseError
 		end
 
 		for _, server in ipairs(response.data) do
@@ -514,7 +630,11 @@ local function findLowestPopulationServer()
 
 	-- Prefer a new server. If every low-population candidate has already been
 	-- visited, reuse the lowest one rather than getting permanently stuck.
-	return bestUnvisited or bestAny, bestUnvisited and nil or "Visited pool exhausted"
+	local selected = bestUnvisited or bestAny
+	if not selected then
+		return nil, "No joinable public server was returned"
+	end
+	return selected, bestUnvisited and nil or "Visited pool exhausted"
 end
 
 local function hopToLowestPopulationServer()
@@ -528,10 +648,12 @@ local function hopToLowestPopulationServer()
 	updateUIStatus("Finding lowest-player public server", Color3.fromRGB(251, 191, 36))
 
 	local server, lookupNote = findLowestPopulationServer()
-	if not server then
-		session.serverHopActive = false
-		updateUIStatus(lookupNote or "No public server found", Color3.fromRGB(248, 113, 113))
-		return false
+	local useMatchmakingFallback = server == nil
+	if useMatchmakingFallback then
+		warn(
+			"[AutoHoneyPickup] Server list unavailable; using public matchmaking:",
+			lookupNote or "unknown response"
+		)
 	end
 
 	local queued = queueScriptForTeleport()
@@ -539,26 +661,36 @@ local function hopToLowestPopulationServer()
 		warn("[AutoHoneyPickup] queue_on_teleport is unavailable; the script may need to be run again after hopping.")
 	end
 
-	visitedServers[server.id] = true
+	if server then
+		visitedServers[server.id] = true
+	end
 	local teleportData = {
-		AutoHoneyVisitedServers = getVisitedServerList(server.id),
+		AutoHoneyVisitedServers = getVisitedServerList(server and server.id or nil),
 	}
 
-	updateUIStatus(
-		string.format("Hopping to %d/%d player server", server.playing, server.capacity),
-		Color3.fromRGB(147, 197, 253)
-	)
+	if server then
+		updateUIStatus(
+			string.format("Hopping to %d/%d player server", server.playing, server.capacity),
+			Color3.fromRGB(147, 197, 253)
+		)
+	else
+		updateUIStatus("Server list blocked - using matchmaking", Color3.fromRGB(251, 191, 36))
+	end
 
 	local teleportOk, teleportError = pcall(function()
-		-- TeleportAsync is server-only. TeleportToPlaceInstance remains the
-		-- client-capable API for joining a chosen public instance.
-		TeleportService:TeleportToPlaceInstance(
-			game.PlaceId,
-			server.id,
-			LocalPlayer,
-			"",
-			teleportData
-		)
+		if server then
+			-- TeleportAsync is server-only. TeleportToPlaceInstance remains the
+			-- client-capable API for joining a chosen public instance.
+			TeleportService:TeleportToPlaceInstance(
+				game.PlaceId,
+				server.id,
+				LocalPlayer,
+				"",
+				teleportData
+			)
+		else
+			TeleportService:Teleport(game.PlaceId, LocalPlayer, teleportData)
+		end
 	end)
 
 	if not teleportOk then
@@ -568,7 +700,7 @@ local function hopToLowestPopulationServer()
 		return false
 	end
 
-	if lookupNote then
+	if lookupNote and not useMatchmakingFallback then
 		log(lookupNote)
 	end
 	return true
@@ -1278,7 +1410,7 @@ while not session.cancelled do
 				local waitAnchor = sawHoneyThisServer and lastHoneyActivity or automationStartedAt
 				local requiredIdle = sawHoneyThisServer
 					and (tonumber(config.ServerHopIdleSeconds) or 2)
-					or (tonumber(config.ServerHopStartDelay) or 3)
+					or (tonumber(config.ServerHopStartDelay) or 5)
 				local remaining = math.max(0, requiredIdle - (now - waitAnchor))
 				local retryReady = now - lastHopAttempt
 					>= (tonumber(config.ServerHopRetrySeconds) or 3)

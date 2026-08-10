@@ -37,7 +37,7 @@ _G.AutoHoneyPickupConfig = {
     CarpetSpeed = 150,
     UseGrapple = true,
     ServerHopEnabled = true,
-    ServerHopStartDelay = 3,
+    ServerHopStartDelay = 5,
     ServerHopIdleSeconds = 2,
     Debug = false,
 }
@@ -45,4 +45,4 @@ _G.AutoHoneyPickupConfig = {
 loadstring(game:HttpGet("https://raw.githubusercontent.com/David809r/auto-honey-pickup/main/autohoneypickup.lua"))()
 ```
 
-The fast hopper waits 3 seconds on a fresh loaded server when no Honey appears. After Honey is detected, it waits for 2 seconds with no available pickup before choosing another server. Failed hops retry after 3 seconds. Teleports must be tested in the Roblox application; Roblox Studio playtesting does not support `TeleportService`.
+The fast hopper waits 5 seconds on a fresh loaded server so the Bee controller can restore its state. After Honey is detected, it waits for 2 seconds with no available pickup before choosing another server. Failed hops retry after 3 seconds. If Roblox blocks the public server-list response, the script falls back to normal public matchmaking instead of getting stuck. Teleports must be tested in the Roblox application; Roblox Studio playtesting does not support `TeleportService`.
