@@ -14,9 +14,10 @@ Your client must support `loadstring` and `game:HttpGet`.
 - Detects the Bee event's live `Honey` models by their hidden claim prompt.
 - Detects whether the Bee event is active from the controller's hive state, with live event models and the bottom-right Bee icon as fallbacks. The UI header shows `ACTIVE`, `INACTIVE`, or `CHECKING`.
 - Fires the Grapple Hook, equips a supported carpet, and glides at a default speed of 150.
+- Precomputes an obstacle-aware waypoint route and follows it around walls instead of pushing straight through structures.
 - Automatically stops within the game's 12-stud claim range.
 - Includes automation controls, live status, speed editing, and a click-to-select teleport test.
-- Finds the lowest-population non-full public server and hops after all available Honey has been handled.
+- While the Bee event is confirmed active, finds the lowest-population non-full public server and hops after all available Honey has been handled. It never hops while the event is inactive or still being confirmed.
 - Carries a short visited-server list through teleport data and re-queues the loadstring when the executor supports it.
 - Cleans up an older running copy when executed again.
 
@@ -38,6 +39,9 @@ _G.AutoHoneyPickupConfig = {
     ArrivalDistance = 4.5,
     CarpetSpeed = 150,
     UseGrapple = true,
+    UsePathfinding = true,
+    PathAgentRadius = 4,
+    PathWaypointReach = 3.5,
     ServerHopEnabled = true,
     ServerHopStartDelay = 5,
     ServerHopIdleSeconds = 2,
@@ -50,4 +54,4 @@ loadstring(game:HttpGet("https://raw.githubusercontent.com/David809r/auto-honey-
 
 Honey movement stops at the configured arrival distance, capped at 6 studs and at half of the pickup prompt's range. With the default settings, the character stops about 4.5 studs from the Honey instead of near the 12-stud claim boundary.
 
-The fast hopper waits 5 seconds on a fresh loaded server so the Bee controller can restore its state. After Honey is detected, it waits for 2 seconds with no available pickup before choosing another server. Failed hops retry after 3 seconds. If Roblox blocks the public server-list response, the script falls back to normal public matchmaking instead of getting stuck. Teleports must be tested in the Roblox application; Roblox Studio playtesting does not support `TeleportService`.
+The fast hopper waits 5 seconds on a fresh loaded server so the Bee controller can restore its state. Its countdown only runs while the UI reports `BEE EVENT: ACTIVE`; an inactive or unconfirmed event keeps the hopper waiting in the current server. After Honey is detected, it waits for 2 seconds with no available pickup before choosing another server. Failed hops retry after 3 seconds. If Roblox blocks the public server-list response, the script falls back to normal public matchmaking instead of getting stuck. Teleports must be tested in the Roblox application; Roblox Studio playtesting does not support `TeleportService`.

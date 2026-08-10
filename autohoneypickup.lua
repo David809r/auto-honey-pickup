@@ -10,6 +10,7 @@ task.wait(1.5)
 local Players = game:GetService("Players")
 local CollectionService = game:GetService("CollectionService")
 local HttpService = game:GetService("HttpService")
+local PathfindingService = game:GetService("PathfindingService")
 local RunService = game:GetService("RunService")
 local TeleportService = game:GetService("TeleportService")
 local UserInputService = game:GetService("UserInputService")
@@ -67,6 +68,9 @@ if config.FlightTimeout == nil then config.FlightTimeout = 10 end
 if config.CarpetSpeed == nil then config.CarpetSpeed = 150 end
 if config.PreferredCarpet == nil then config.PreferredCarpet = "Flying Carpet" end
 if config.UseGrapple == nil then config.UseGrapple = true end
+if config.UsePathfinding == nil then config.UsePathfinding = true end
+if config.PathAgentRadius == nil then config.PathAgentRadius = 4 end
+if config.PathWaypointReach == nil then config.PathWaypointReach = 3.5 end
 if config.ServerHopEnabled == nil then config.ServerHopEnabled = true end
 if config.ServerHopStartDelay == nil then config.ServerHopStartDelay = 5 end
 if config.ServerHopIdleSeconds == nil then config.ServerHopIdleSeconds = 2 end
@@ -334,6 +338,142 @@ local function getArrivalDistance(jar)
 	return configuredDistance
 end
 
+local function getPathIgnoreList(jar)
+	local ignore = {}
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player.Character then
+			ignore[#ignore + 1] = player.Character
+		end
+	end
+	if jar then
+		ignore[#ignore + 1] = jar
+	end
+	return ignore
+end
+
+local function findBlockingObstacle(origin, target, jar)
+	local direction = target - origin
+	if direction.Magnitude < 0.05 then
+		return nil
+	end
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.IgnoreWater = true
+	local ignore = getPathIgnoreList(jar)
+	local rayOrigin = origin
+
+	-- Skip non-collidable decoration until a real wall/structure is reached.
+	for _ = 1, 16 do
+		params.FilterDescendantsInstances = ignore
+		local remaining = target - rayOrigin
+		if remaining.Magnitude < 0.05 then
+			return nil
+		end
+
+		local result = Workspace:Raycast(rayOrigin, remaining, params)
+		if not result then
+			return nil
+		end
+
+		local instance = result.Instance
+		if instance == Workspace.Terrain
+			or (instance:IsA("BasePart") and instance.CanCollide)
+		then
+			return result
+		end
+
+		ignore[#ignore + 1] = instance
+		rayOrigin = result.Position + remaining.Unit * 0.2
+	end
+
+	return nil
+end
+
+local function isFlightSegmentClear(origin, target, jar)
+	local direction = target - origin
+	local flat = Vector3.new(direction.X, 0, direction.Z)
+	if flat.Magnitude < 0.1 then
+		return findBlockingObstacle(origin, target, jar) == nil
+	end
+
+	local clearance = math.clamp(tonumber(config.PathAgentRadius) or 4, 2, 8)
+	local perpendicular = Vector3.new(-flat.Z, 0, flat.X).Unit * clearance
+	for _, offset in ipairs({ Vector3.zero, perpendicular, -perpendicular }) do
+		if findBlockingObstacle(origin + offset, target + offset, jar) then
+			return false
+		end
+	end
+
+	return true
+end
+
+local function getGroundRoutePosition(position, jar)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = getPathIgnoreList(jar)
+	params.IgnoreWater = true
+
+	local origin = position + Vector3.new(0, 4, 0)
+	local result = Workspace:Raycast(origin, Vector3.new(0, -80, 0), params)
+	if result then
+		return result.Position + Vector3.new(0, 3, 0)
+	end
+	return position
+end
+
+local function computeHoneyRoute(fromPosition, targetPosition, jar)
+	if not config.UsePathfinding or isFlightSegmentClear(fromPosition, targetPosition, jar) then
+		return { targetPosition }, false
+	end
+
+	updateUIStatus("Wall detected - planning Honey route", Color3.fromRGB(251, 191, 36))
+	local startPosition = getGroundRoutePosition(fromPosition, jar)
+	local endPosition = getGroundRoutePosition(targetPosition, jar)
+	local path = PathfindingService:CreatePath({
+		AgentRadius = math.clamp(tonumber(config.PathAgentRadius) or 4, 2, 8),
+		AgentHeight = 5,
+		AgentCanJump = true,
+		AgentCanClimb = true,
+		AgentJumpHeight = 10,
+		AgentMaxSlope = 89,
+		WaypointSpacing = 5,
+	})
+
+	local computed = pcall(function()
+		path:ComputeAsync(startPosition, endPosition)
+	end)
+	if not computed or path.Status ~= Enum.PathStatus.Success then
+		log("Pathfinding failed", path.Status.Name)
+		return nil, true
+	end
+
+	local route = {}
+	for index, waypoint in ipairs(path:GetWaypoints()) do
+		if index > 1 then
+			local lift = waypoint.Action == Enum.PathWaypointAction.Jump and 5 or 3
+			route[#route + 1] = waypoint.Position + Vector3.new(0, lift, 0)
+		end
+	end
+
+	if #route == 0 then
+		return nil, true
+	end
+
+	if (route[#route] - targetPosition).Magnitude > 1 then
+		route[#route + 1] = targetPosition
+	else
+		route[#route] = targetPosition
+	end
+
+	log("Planned Honey route with", #route, "waypoints")
+	updateUIStatus(
+		string.format("Honey route ready - %d waypoints", #route),
+		Color3.fromRGB(147, 197, 253)
+	)
+	return route, true
+end
+
 local function trackJar(instance)
 	if isHoneyJar(instance) and getJarPosition(instance) then
 		if trackedJars[instance] == nil then
@@ -513,6 +653,9 @@ _G.AutoHoneyPickupConfig = {
 	ArrivalDistance = %.2f,
 	CarpetSpeed = %d,
 	UseGrapple = %s,
+	UsePathfinding = %s,
+	PathAgentRadius = %.2f,
+	PathWaypointReach = %.2f,
 	ServerHopEnabled = %s,
 	ServerHopStartDelay = %d,
 	ServerHopIdleSeconds = %d,
@@ -525,6 +668,9 @@ loadstring(game:HttpGet(%q))()
 		math.clamp(tonumber(config.ArrivalDistance) or 4.5, 1, 6),
 		math.floor(tonumber(config.CarpetSpeed) or 150),
 		tostring(config.UseGrapple == true),
+		tostring(config.UsePathfinding == true),
+		math.clamp(tonumber(config.PathAgentRadius) or 4, 2, 8),
+		math.clamp(tonumber(config.PathWaypointReach) or 3.5, 2, 6),
 		tostring(config.ServerHopEnabled == true),
 		math.floor(tonumber(config.ServerHopStartDelay) or 5),
 		math.floor(tonumber(config.ServerHopIdleSeconds) or 2),
@@ -851,10 +997,26 @@ local function flyToJar(jar, useGrappleEngage)
 	end)
 
 	local startedAt = os.clock()
-	local lastDistance = math.huge
+	local initialTarget = getJarPosition(jar)
+	if not initialTarget then
+		return "collected"
+	end
+
+	local route, usedPathfinding = computeHoneyRoute(root.Position, initialTarget, jar)
+	if not route then
+		stopMovement()
+		updateUIStatus("No safe path to Honey - trying another", Color3.fromRGB(248, 113, 113))
+		return "no_path"
+	end
+
+	local waypointIndex = 1
+	local plannedTarget = initialTarget
+	local lastWaypointDistance = math.huge
 	local stalledFrames = 0
 	local nextEquipAt = 0
 	local flightSpeed = math.max(1, tonumber(config.CarpetSpeed) or 150)
+	local waypointReach = math.clamp(tonumber(config.PathWaypointReach) or 3.5, 2, 6)
+	local replans = 0
 
 	while os.clock() - startedAt < config.FlightTimeout do
 		if session.cancelled or not config.Enabled then
@@ -886,6 +1048,39 @@ local function flyToJar(jar, useGrappleEngage)
 			return getJarPosition(jar) and "arrived" or "collected"
 		end
 
+		-- Honey can still be falling when first replicated. Recompute the complete
+		-- route if its destination moved materially after the original plan.
+		if (targetPosition - plannedTarget).Magnitude > 8 and replans < 2 then
+			local newRoute, newUsedPathfinding = computeHoneyRoute(root.Position, targetPosition, jar)
+			if not newRoute then
+				stopMovement()
+				return "no_path"
+			end
+			route = newRoute
+			usedPathfinding = newUsedPathfinding
+			waypointIndex = 1
+			plannedTarget = targetPosition
+			lastWaypointDistance = math.huge
+			stalledFrames = 0
+			replans += 1
+		end
+
+		-- Keep only the final destination synchronized with the live Honey model;
+		-- all preceding points remain the predetermined obstacle-avoidance route.
+		route[#route] = targetPosition
+		local waypoint = route[waypointIndex]
+		local waypointOffset = waypoint - root.Position
+		local waypointDistance = waypointOffset.Magnitude
+
+		while waypointIndex < #route and waypointDistance <= waypointReach do
+			waypointIndex += 1
+			waypoint = route[waypointIndex]
+			waypointOffset = waypoint - root.Position
+			waypointDistance = waypointOffset.Magnitude
+			lastWaypointDistance = math.huge
+			stalledFrames = 0
+		end
+
 		if os.clock() >= nextEquipAt then
 			if not equipCarpet() then
 				stopMovement()
@@ -894,19 +1089,33 @@ local function flyToJar(jar, useGrappleEngage)
 			nextEquipAt = os.clock() + 0.5
 		end
 
-		if distance >= lastDistance - 0.05 then
+		if waypointDistance >= lastWaypointDistance - 0.05 then
 			stalledFrames += 1
 		else
 			stalledFrames = 0
 		end
-		lastDistance = distance
+		lastWaypointDistance = waypointDistance
 
-		if stalledFrames >= 60 then
+		if stalledFrames >= 30 then
+			if usedPathfinding and replans < 2 then
+				local newRoute, newUsedPathfinding = computeHoneyRoute(root.Position, targetPosition, jar)
+				if newRoute then
+					route = newRoute
+					usedPathfinding = newUsedPathfinding
+					waypointIndex = 1
+					plannedTarget = targetPosition
+					lastWaypointDistance = math.huge
+					stalledFrames = 0
+					replans += 1
+					continue
+				end
+			end
 			stopMovement()
 			return "stalled"
 		end
 
-		root.AssemblyLinearVelocity = offset.Unit * flightSpeed
+		local segmentSpeed = math.min(flightSpeed, math.max(30, waypointDistance * 6))
+		root.AssemblyLinearVelocity = waypointOffset.Unit * segmentSpeed
 		root.AssemblyAngularVelocity = Vector3.zero
 		RunService.Heartbeat:Wait()
 	end
@@ -1000,7 +1209,7 @@ local function collectJar(jar)
 				end
 				trackedJars[jar] = os.clock() + 3
 				break
-			elseif result == "stalled" or result == "timeout" then
+			elseif result == "no_path" or result == "stalled" or result == "timeout" then
 				trackedJars[jar] = os.clock() + 3
 				break
 			elseif result == "arrived" then
@@ -1537,9 +1746,9 @@ while not session.cancelled do
 				local retryReady = now - lastHopAttempt
 					>= (tonumber(config.ServerHopRetrySeconds) or 3)
 
-				if config.ServerHopEnabled and remaining <= 0 and retryReady then
+				if config.ServerHopEnabled and beeEventActive == true and remaining <= 0 and retryReady then
 					hopToLowestPopulationServer()
-				elseif config.ServerHopEnabled then
+				elseif config.ServerHopEnabled and beeEventActive == true then
 					local displayedRemaining = math.ceil(math.max(
 						remaining,
 						(tonumber(config.ServerHopRetrySeconds) or 3) - (now - lastHopAttempt)
@@ -1550,6 +1759,17 @@ while not session.cancelled do
 							or (beeEventActive == false and "Bee event inactive" or "Checking Bee event")
 						updateUIStatus(
 							string.format("%s - hopping in %ds", eventText, displayedRemaining),
+							Color3.fromRGB(148, 163, 184)
+						)
+					end
+				elseif config.ServerHopEnabled then
+					local waitingState = beeEventActive == false and "inactive" or "checking"
+					if lastHopCountdown ~= waitingState then
+						lastHopCountdown = waitingState
+						updateUIStatus(
+							beeEventActive == false
+								and "Bee event inactive - hopper waiting"
+								or "Confirming Bee event - hopper waiting",
 							Color3.fromRGB(148, 163, 184)
 						)
 					end
