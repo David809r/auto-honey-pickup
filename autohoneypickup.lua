@@ -1983,7 +1983,7 @@ local function createControlPanel()
 	title.Size = UDim2.new(1, -62, 0, 22)
 	title.BackgroundTransparency = 1
 	title.Font = Enum.Font.GothamBold
-	title.Text = "AUTO HONEY PICKUP"
+	title.Text = "David809's Auto Honey"
 	title.TextColor3 = Color3.fromRGB(255, 255, 255)
 	title.TextSize = 15
 	title.TextXAlignment = Enum.TextXAlignment.Left
@@ -1991,29 +1991,40 @@ local function createControlPanel()
 
 	local subtitle = Instance.new("TextLabel")
 	subtitle.Position = UDim2.fromOffset(14, 29)
-	subtitle.Size = UDim2.new(1, -62, 0, 16)
+	subtitle.Size = UDim2.fromOffset(166, 16)
 	subtitle.BackgroundTransparency = 1
 	subtitle.Font = Enum.Font.Gotham
-	subtitle.Text = "BEE EVENT: CHECKING"
+	subtitle.Text = "made by @affiliative on discord"
 	subtitle.TextColor3 = Color3.fromRGB(191, 219, 254)
-	subtitle.TextSize = 10
+	subtitle.TextSize = 9
 	subtitle.TextXAlignment = Enum.TextXAlignment.Left
 	subtitle.Parent = header
 
+	local beeEventLabel = Instance.new("TextLabel")
+	beeEventLabel.Position = UDim2.fromOffset(180, 29)
+	beeEventLabel.Size = UDim2.fromOffset(110, 16)
+	beeEventLabel.BackgroundTransparency = 1
+	beeEventLabel.Font = Enum.Font.GothamBold
+	beeEventLabel.Text = "BEE EVENT: CHECKING"
+	beeEventLabel.TextColor3 = Color3.fromRGB(191, 219, 254)
+	beeEventLabel.TextSize = 9
+	beeEventLabel.TextXAlignment = Enum.TextXAlignment.Right
+	beeEventLabel.Parent = header
+
 	updateBeeEventIndicator = function(active)
-		if not subtitle.Parent then
+		if not beeEventLabel.Parent then
 			return
 		end
 
 		if active == true then
-			subtitle.Text = "BEE EVENT: ACTIVE"
-			subtitle.TextColor3 = Color3.fromRGB(134, 239, 172)
+			beeEventLabel.Text = "BEE EVENT: ACTIVE"
+			beeEventLabel.TextColor3 = Color3.fromRGB(134, 239, 172)
 		elseif active == false then
-			subtitle.Text = "BEE EVENT: INACTIVE"
-			subtitle.TextColor3 = Color3.fromRGB(253, 186, 116)
+			beeEventLabel.Text = "BEE EVENT: INACTIVE"
+			beeEventLabel.TextColor3 = Color3.fromRGB(253, 186, 116)
 		else
-			subtitle.Text = "BEE EVENT: CHECKING"
-			subtitle.TextColor3 = Color3.fromRGB(191, 219, 254)
+			beeEventLabel.Text = "BEE EVENT: CHECKING"
+			beeEventLabel.TextColor3 = Color3.fromRGB(191, 219, 254)
 		end
 	end
 
