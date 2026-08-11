@@ -118,6 +118,7 @@ if config.ServerHopStartDelay == nil then config.ServerHopStartDelay = 5 end
 if config.ServerHopIdleSeconds == nil then config.ServerHopIdleSeconds = 2 end
 if config.ServerHopRetrySeconds == nil then config.ServerHopRetrySeconds = 3 end
 if config.ServerHopMaxPages == nil then config.ServerHopMaxPages = 1 end
+if config.ServerHopRandomPoolSize == nil then config.ServerHopRandomPoolSize = 10 end
 if config.RequeueOnTeleport == nil then config.RequeueOnTeleport = true end
 if config.BeeEventCheckInterval == nil then config.BeeEventCheckInterval = 0.5 end
 
@@ -1145,6 +1146,7 @@ _G.AutoHoneyPickupConfig = {
 	ServerHopEnabled = %s,
 	ServerHopStartDelay = %d,
 	ServerHopIdleSeconds = %d,
+	ServerHopRandomPoolSize = %d,
 	BeeEventCheckInterval = %.2f,
 	RequeueOnTeleport = true,
 }
@@ -1169,6 +1171,7 @@ loadstring(game:HttpGet(%q))()
 		tostring(config.ServerHopEnabled == true),
 		math.floor(tonumber(config.ServerHopStartDelay) or 5),
 		math.floor(tonumber(config.ServerHopIdleSeconds) or 2),
+		math.floor(math.clamp(tonumber(config.ServerHopRandomPoolSize) or 10, 1, 50)),
 		math.max(0.1, tonumber(config.BeeEventCheckInterval) or 0.5),
 		LOADSTRING_URL
 	)
@@ -1325,17 +1328,15 @@ local function fetchServerPage(cursor)
 	return emptyResponse, emptyResponse and nil or lastError
 end
 
-local function findLowestPopulationServer()
-	local bestUnvisited
-	local bestAny
+local serverHopRandom = Random.new(
+	(os.time() + (LocalPlayer.UserId % 1000000) * 997 + math.floor(os.clock() * 1000)) % 2147483647
+)
+
+local function findRandomLowPopulationServer()
+	local unvisitedCandidates = {}
+	local allCandidates = {}
 	local cursor
 	local maxPages = math.clamp(tonumber(config.ServerHopMaxPages) or 1, 1, 10)
-
-	local function isBetter(candidate, currentBest)
-		return not currentBest
-			or candidate.playing < currentBest.playing
-			or (candidate.playing == currentBest.playing and candidate.id < currentBest.id)
-	end
 
 	for _ = 1, maxPages do
 		local response, responseError = fetchServerPage(cursor)
@@ -1355,12 +1356,15 @@ local function findLowestPopulationServer()
 				and capacity
 				and playing < capacity
 			then
-				local candidate = { id = serverId, playing = playing, capacity = capacity }
-				if isBetter(candidate, bestAny) then
-					bestAny = candidate
-				end
-				if not visitedServers[serverId] and isBetter(candidate, bestUnvisited) then
-					bestUnvisited = candidate
+				local candidate = {
+					id = serverId,
+					playing = playing,
+					capacity = capacity,
+					randomOrder = serverHopRandom:NextNumber(),
+				}
+				table.insert(allCandidates, candidate)
+				if not visitedServers[serverId] then
+					table.insert(unvisitedCandidates, candidate)
 				end
 			end
 		end
@@ -1371,16 +1375,31 @@ local function findLowestPopulationServer()
 		end
 	end
 
-	-- Prefer a new server. If every low-population candidate has already been
-	-- visited, reuse the lowest one rather than getting permanently stuck.
-	local selected = bestUnvisited or bestAny
-	if not selected then
+	-- Prefer unvisited instances, but allow reuse if the pool is exhausted.
+	-- Sort by population, randomize ties, then choose randomly within the
+	-- lowest-ranked window. This retains low-player priority without sending
+	-- every client to the exact same first server.
+	local candidatePool = #unvisitedCandidates > 0 and unvisitedCandidates or allCandidates
+	if #candidatePool == 0 then
 		return nil, "No joinable public server was returned"
 	end
-	return selected, bestUnvisited and nil or "Visited pool exhausted"
+
+	table.sort(candidatePool, function(a, b)
+		if a.playing ~= b.playing then
+			return a.playing < b.playing
+		end
+		return a.randomOrder < b.randomOrder
+	end)
+
+	local lowPopulationPoolSize = math.min(
+		#candidatePool,
+		math.floor(math.clamp(tonumber(config.ServerHopRandomPoolSize) or 10, 1, 50))
+	)
+	local selected = candidatePool[serverHopRandom:NextInteger(1, lowPopulationPoolSize)]
+	return selected, #unvisitedCandidates > 0 and nil or "Visited pool exhausted"
 end
 
-local function hopToLowestPopulationServer()
+local function hopToRandomLowPopulationServer()
 	if session.serverHopActive or session.testActive or session.cancelled then
 		return false
 	end
@@ -1388,9 +1407,9 @@ local function hopToLowestPopulationServer()
 	session.serverHopActive = true
 	lastHopAttempt = os.clock()
 	stopMovement()
-	updateUIStatus("Finding lowest-player public server", Color3.fromRGB(251, 191, 36))
+	updateUIStatus("Finding random low-player server", Color3.fromRGB(251, 191, 36))
 
-	local server, lookupNote = findLowestPopulationServer()
+	local server, lookupNote = findRandomLowPopulationServer()
 	local useMatchmakingFallback = server == nil
 	if useMatchmakingFallback then
 		warn(
@@ -2368,7 +2387,7 @@ while not session.cancelled do
 					>= (tonumber(config.ServerHopRetrySeconds) or 3)
 
 				if config.ServerHopEnabled and beeEventActive == true and remaining <= 0 and retryReady then
-					hopToLowestPopulationServer()
+					hopToRandomLowPopulationServer()
 				elseif config.ServerHopEnabled and beeEventActive == true then
 					local displayedRemaining = math.ceil(math.max(
 						remaining,
