@@ -14,12 +14,13 @@ Your client must support `loadstring` and `game:HttpGet`.
 - Detects the Bee event's live `Honey` models by their hidden claim prompt.
 - Detects whether the Bee event is active from the controller's hive state, with live event models and the bottom-right Bee icon as fallbacks. The UI header shows `ACTIVE`, `INACTIVE`, or `CHECKING`.
 - Fires the Grapple Hook, equips a supported carpet, and glides at a default speed of 150.
+- Raises the character 5.5 studs above normal standing height before every automatic or test route, clearing raised base collect zones without stacking altitude on retries.
 - Aims each grapple at the first safe route waypoint, so the player camera angle cannot redirect its launch.
 - Prevents teleport ragdolls, cancels rotational fling, clamps abnormal launch speed, and forces the humanoid back up after arrival.
 - Precomputes a multi-wall grid route, checks every player-width segment, and follows it around structures instead of pushing through them. Unsafe routes are rejected.
 - Automatically stops within the game's 12-stud claim range.
 - Includes automation controls, live status, speed editing, and a click-to-select teleport test.
-- While the Bee event is confirmed active, sorts non-full public servers by population and randomly chooses from the 10 lowest by default. Each client uses a separate random stream so multiple users are unlikely to follow each other while still prioritizing low-player servers. It never hops while the event is inactive or still being confirmed.
+- While the Bee event is confirmed active, sorts non-full public servers by population and randomly chooses from the 20 lowest by default. Each client uses a separate random stream so multiple users are unlikely to follow each other while still prioritizing low-player servers. It never hops while the event is inactive or still being confirmed.
 - Carries a short visited-server list through teleport data and re-queues the loadstring when the executor supports it.
 - Cleans up an older running copy when executed again.
 
@@ -41,6 +42,7 @@ _G.AutoHoneyPickupConfig = {
     ArrivalDistance = 4.5,
     TestArrivalDistance = 5,
     CarpetSpeed = 150,
+    PreFlightLiftStuds = 5.5,
     UseGrapple = true,
     AimGrappleAtRoute = true,
     AntiRagdoll = true,
@@ -56,7 +58,7 @@ _G.AutoHoneyPickupConfig = {
     ServerHopEnabled = true,
     ServerHopStartDelay = 5,
     ServerHopIdleSeconds = 2,
-    ServerHopRandomPoolSize = 10,
+    ServerHopRandomPoolSize = 20,
     BeeEventCheckInterval = 0.5,
     Debug = false,
 }

@@ -100,6 +100,7 @@ if config.ScanInterval == nil then config.ScanInterval = 0.25 end
 if config.TargetTimeout == nil then config.TargetTimeout = 30 end
 if config.FlightTimeout == nil then config.FlightTimeout = 10 end
 if config.CarpetSpeed == nil then config.CarpetSpeed = 150 end
+if config.PreFlightLiftStuds == nil then config.PreFlightLiftStuds = 5.5 end
 if config.PreferredCarpet == nil then config.PreferredCarpet = "Flying Carpet" end
 if config.UseGrapple == nil then config.UseGrapple = true end
 if config.AimGrappleAtRoute == nil then config.AimGrappleAtRoute = true end
@@ -118,7 +119,7 @@ if config.ServerHopStartDelay == nil then config.ServerHopStartDelay = 5 end
 if config.ServerHopIdleSeconds == nil then config.ServerHopIdleSeconds = 2 end
 if config.ServerHopRetrySeconds == nil then config.ServerHopRetrySeconds = 3 end
 if config.ServerHopMaxPages == nil then config.ServerHopMaxPages = 1 end
-if config.ServerHopRandomPoolSize == nil then config.ServerHopRandomPoolSize = 10 end
+if config.ServerHopRandomPoolSize == nil then config.ServerHopRandomPoolSize = 20 end
 if config.RequeueOnTeleport == nil then config.RequeueOnTeleport = true end
 if config.BeeEventCheckInterval == nil then config.BeeEventCheckInterval = 0.5 end
 
@@ -155,7 +156,10 @@ end
 if previousInternalVersion < 6 then
 	config.PathWaypointReach = 1.5
 end
-config.InternalVersion = 8
+if previousInternalVersion == 8 and tonumber(config.ServerHopRandomPoolSize) == 10 then
+	config.ServerHopRandomPoolSize = 20
+end
+config.InternalVersion = 9
 
 local trackedJars = {}
 local warnedMissingCarpet = false
@@ -763,7 +767,9 @@ local function computeTravelRoute(fromPosition, targetPosition, jar, routeLabel)
 			route = {}
 			for index, waypoint in ipairs(path:GetWaypoints()) do
 				if index > 1 then
-					local lift = waypoint.Action == Enum.PathWaypointAction.Jump and 5 or 3
+					local travelLift = math.clamp(tonumber(config.PreFlightLiftStuds) or 5.5, 5, 6)
+					local lift = (waypoint.Action == Enum.PathWaypointAction.Jump and 5 or 3)
+						+ travelLift
 					route[#route + 1] = waypoint.Position + Vector3.new(0, lift, 0)
 				end
 			end
@@ -936,6 +942,41 @@ local function recoverHumanoidFor(humanoid, root, duration, holdPosition)
 		end
 		RunService.Heartbeat:Wait()
 	until os.clock() >= deadline or session.cancelled
+end
+
+local function liftBeforeTravel(humanoid, root)
+	if not humanoid or not root or not humanoid.Parent or not root.Parent then
+		return false
+	end
+
+	local liftStuds = math.clamp(tonumber(config.PreFlightLiftStuds) or 5.5, 5, 6)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { humanoid.Parent }
+	params.IgnoreWater = true
+
+	local groundResult = Workspace:Raycast(
+		root.Position + Vector3.new(0, 1, 0),
+		Vector3.new(0, -80, 0),
+		params
+	)
+	local desiredY = root.Position.Y + liftStuds
+	if groundResult then
+		local standingHeight = math.clamp(humanoid.HipHeight + root.Size.Y * 0.5, 2.5, 5)
+		desiredY = groundResult.Position.Y + standingHeight + liftStuds
+	end
+
+	-- Keep retries at the requested travel clearance instead of stacking another
+	-- lift each time an existing route is retried.
+	local verticalLift = math.max(0, desiredY - root.Position.Y)
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+	if verticalLift > 0.1 then
+		root.CFrame += Vector3.new(0, verticalLift, 0)
+	end
+	stabilizeHumanoid(humanoid, root, true)
+	RunService.Heartbeat:Wait()
+	return root.Parent ~= nil and humanoid.Health > 0
 end
 
 do
@@ -1131,6 +1172,7 @@ _G.AutoHoneyPickupConfig = {
 	ArrivalDistance = %.2f,
 	TestArrivalDistance = %.2f,
 	CarpetSpeed = %d,
+	PreFlightLiftStuds = %.2f,
 	UseGrapple = %s,
 	AimGrappleAtRoute = %s,
 	AntiRagdoll = %s,
@@ -1156,6 +1198,7 @@ loadstring(game:HttpGet(%q))()
 		math.clamp(tonumber(config.ArrivalDistance) or 4.5, 1, 6),
 		math.clamp(tonumber(config.TestArrivalDistance) or 5, 3, 6),
 		math.floor(tonumber(config.CarpetSpeed) or 150),
+		math.clamp(tonumber(config.PreFlightLiftStuds) or 5.5, 5, 6),
 		tostring(config.UseGrapple == true),
 		tostring(config.AimGrappleAtRoute == true),
 		tostring(config.AntiRagdoll == true),
@@ -1171,7 +1214,7 @@ loadstring(game:HttpGet(%q))()
 		tostring(config.ServerHopEnabled == true),
 		math.floor(tonumber(config.ServerHopStartDelay) or 5),
 		math.floor(tonumber(config.ServerHopIdleSeconds) or 2),
-		math.floor(math.clamp(tonumber(config.ServerHopRandomPoolSize) or 10, 1, 50)),
+		math.floor(math.clamp(tonumber(config.ServerHopRandomPoolSize) or 20, 1, 50)),
 		math.max(0.1, tonumber(config.BeeEventCheckInterval) or 0.5),
 		LOADSTRING_URL
 	)
@@ -1393,7 +1436,7 @@ local function findRandomLowPopulationServer()
 
 	local lowPopulationPoolSize = math.min(
 		#candidatePool,
-		math.floor(math.clamp(tonumber(config.ServerHopRandomPoolSize) or 10, 1, 50))
+		math.floor(math.clamp(tonumber(config.ServerHopRandomPoolSize) or 20, 1, 50))
 	)
 	local selected = candidatePool[serverHopRandom:NextInteger(1, lowPopulationPoolSize)]
 	return selected, #unvisitedCandidates > 0 and nil or "Visited pool exhausted"
@@ -1502,6 +1545,10 @@ local function flyToJar(jar, useGrappleEngage)
 	end
 	configureHumanoidAntiRagdoll(humanoid)
 	stabilizeHumanoid(humanoid, root, true)
+	updateUIStatus("Lifting above collect zones", Color3.fromRGB(147, 197, 253))
+	if not liftBeforeTravel(humanoid, root) then
+		return "character_changed"
+	end
 
 	local initialTarget = getJarPosition(jar)
 	if not initialTarget then
@@ -1683,6 +1730,10 @@ local function flyToTestPoint(worldPosition)
 	end
 	configureHumanoidAntiRagdoll(humanoid)
 	stabilizeHumanoid(humanoid, root, true)
+	updateUIStatus("Test lifting above collect zones", Color3.fromRGB(147, 197, 253))
+	if not liftBeforeTravel(humanoid, root) then
+		return false, "Character changed during pre-flight lift"
+	end
 
 	-- Mouse.Hit is on the clicked surface; lift the destination so the root does
 	-- not aim below the floor.
