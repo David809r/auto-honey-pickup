@@ -1944,7 +1944,7 @@ local function createControlPanel()
 	local panel = Instance.new("Frame")
 	panel.Name = "Panel"
 	panel.Position = UDim2.fromOffset(24, 110)
-	panel.Size = UDim2.fromOffset(340, 362)
+	panel.Size = UDim2.fromOffset(340, 378)
 	panel.BackgroundColor3 = Color3.fromRGB(9, 14, 27)
 	panel.BorderSizePixel = 0
 	panel.Active = true
@@ -1961,7 +1961,7 @@ local function createControlPanel()
 
 	local header = Instance.new("Frame")
 	header.Name = "Header"
-	header.Size = UDim2.new(1, 0, 0, 54)
+	header.Size = UDim2.new(1, 0, 0, 70)
 	header.BackgroundColor3 = Color3.fromRGB(30, 64, 175)
 	header.BorderSizePixel = 0
 	header.Active = true
@@ -1979,7 +1979,7 @@ local function createControlPanel()
 	headerCover.Parent = header
 
 	local title = Instance.new("TextLabel")
-	title.Position = UDim2.fromOffset(14, 7)
+	title.Position = UDim2.fromOffset(14, 5)
 	title.Size = UDim2.new(1, -62, 0, 22)
 	title.BackgroundTransparency = 1
 	title.Font = Enum.Font.GothamBold
@@ -1990,25 +1990,25 @@ local function createControlPanel()
 	title.Parent = header
 
 	local subtitle = Instance.new("TextLabel")
-	subtitle.Position = UDim2.fromOffset(14, 29)
-	subtitle.Size = UDim2.fromOffset(166, 16)
+	subtitle.Position = UDim2.fromOffset(14, 27)
+	subtitle.Size = UDim2.new(1, -62, 0, 14)
 	subtitle.BackgroundTransparency = 1
 	subtitle.Font = Enum.Font.Gotham
 	subtitle.Text = "made by @affiliative on discord"
 	subtitle.TextColor3 = Color3.fromRGB(191, 219, 254)
-	subtitle.TextSize = 9
+	subtitle.TextSize = 10
 	subtitle.TextXAlignment = Enum.TextXAlignment.Left
 	subtitle.Parent = header
 
 	local beeEventLabel = Instance.new("TextLabel")
-	beeEventLabel.Position = UDim2.fromOffset(180, 29)
-	beeEventLabel.Size = UDim2.fromOffset(110, 16)
+	beeEventLabel.Position = UDim2.fromOffset(14, 43)
+	beeEventLabel.Size = UDim2.new(1, -62, 0, 16)
 	beeEventLabel.BackgroundTransparency = 1
 	beeEventLabel.Font = Enum.Font.GothamBold
 	beeEventLabel.Text = "BEE EVENT: CHECKING"
 	beeEventLabel.TextColor3 = Color3.fromRGB(191, 219, 254)
 	beeEventLabel.TextSize = 9
-	beeEventLabel.TextXAlignment = Enum.TextXAlignment.Right
+	beeEventLabel.TextXAlignment = Enum.TextXAlignment.Left
 	beeEventLabel.Parent = header
 
 	updateBeeEventIndicator = function(active)
@@ -2029,7 +2029,7 @@ local function createControlPanel()
 	end
 
 	local minimizeButton = Instance.new("TextButton")
-	minimizeButton.Position = UDim2.new(1, -43, 0, 11)
+	minimizeButton.Position = UDim2.new(1, -43, 0, 20)
 	minimizeButton.Size = UDim2.fromOffset(30, 30)
 	minimizeButton.BackgroundColor3 = Color3.fromRGB(23, 48, 133)
 	minimizeButton.BorderSizePixel = 0
@@ -2044,8 +2044,8 @@ local function createControlPanel()
 	minimizeCorner.Parent = minimizeButton
 
 	local content = Instance.new("Frame")
-	content.Position = UDim2.fromOffset(0, 54)
-	content.Size = UDim2.new(1, 0, 1, -54)
+	content.Position = UDim2.fromOffset(0, 70)
+	content.Size = UDim2.new(1, 0, 1, -70)
 	content.BackgroundTransparency = 1
 	content.Parent = panel
 
@@ -2339,7 +2339,7 @@ local function createControlPanel()
 	table.insert(session.connections, minimizeButton.Activated:Connect(function()
 		minimized = not minimized
 		content.Visible = not minimized
-		panel.Size = minimized and UDim2.fromOffset(340, 54) or UDim2.fromOffset(340, 362)
+		panel.Size = minimized and UDim2.fromOffset(340, 70) or UDim2.fromOffset(340, 378)
 		minimizeButton.Text = minimized and "+" or "-"
 	end))
 
